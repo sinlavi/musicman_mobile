@@ -370,12 +370,16 @@ input[type=range].mm-range.vol::-webkit-slider-runnable-track{
 input[type=range].mm-range.vol::-moz-range-progress{ background: var(--bs-secondary-color); }
 
 /* ─── BOTTOM SHEETS ─── */
+/* FIX: ensure sheets + their backdrop stack ABOVE the full-screen player (z-index 1080). */
 .offcanvas.mm-sheet{
   height:auto; max-height:88vh;
   border-radius: 22px 22px 0 0; border:0;
   padding-bottom: var(--safe-bot);
   background: var(--bs-body-bg);
+  z-index: 1090 !important;
 }
+.offcanvas-backdrop{ z-index: 1085 !important; }
+
 .sheet-handle{
   width:38px; height:4px; border-radius:999px;
   background: rgba(var(--bs-body-color-rgb),.22);
@@ -672,7 +676,16 @@ const KEY = {
   downloads:'mm_downloads',
   plays:    'mm_recently_played'
 };
+
+/** Poll interval for crawl status. */
 const POLL_MS = 2500;
+
+/**
+ * Grace period (ms) after a crawl is queued before we trust a "not found
+ * in queue" response to mean "completed". Avoids a race where the server
+ * hasn't yet registered the new job.
+ */
+const QUEUE_GRACE_MS = 3000;
 
 /* ══════════════════════════════════════════════════════════════
    2 · UTILITIES
@@ -689,10 +702,9 @@ const ls = {
   set(k,v){ try{ localStorage.setItem(k, JSON.stringify(v)); } catch {} }
 };
 
-const sleep = ms => new Promise(r => setTimeout(r, ms));
-const cleanId = id => id ? String(id).replace(/^it_/, '') : '';
-const proxyUrl = u => u ? `${API_BASE}/proxy?url=${encodeURIComponent(u)}` : '';
-const haptic = ms => { try { navigator.vibrate?.(ms); } catch {} };
+const cleanId  = id => id ? String(id).replace(/^it_/, '') : '';
+const proxyUrl = u  => u ? `${API_BASE}/proxy?url=${encodeURIComponent(u)}` : '';
+const haptic   = ms => { try { navigator.vibrate?.(ms); } catch {} };
 
 function fmtTime(sec){
   sec = Number(sec);
@@ -724,7 +736,10 @@ function toast(msg, variant='dark'){
 function sheet(id){ return bootstrap.Offcanvas.getOrCreateInstance($(id)); }
 function closeAllSheets(){
   ['#sheetTrack','#sheetPl','#sheetQueue','#sheetPrompt','#sheetConfirm','#sheetSleep']
-    .forEach(s => { const el = $(s); if (!el) return; const i = bootstrap.Offcanvas.getInstance(el); if (i) i.hide(); });
+    .forEach(s => {
+      const el = $(s); if (!el) return;
+      const i = bootstrap.Offcanvas.getInstance(el); if (i) i.hide();
+    });
 }
 
 let _promptResolve = null;
@@ -780,7 +795,7 @@ async function api(path, opts={}){
         ...(opts.headers || {})
       }
     });
-  } catch (e) {
+  } catch {
     throw new Error('Network error');
   }
   const text = await res.text().catch(() => '');
@@ -789,20 +804,52 @@ async function api(path, opts={}){
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
   return data;
 }
-const apiSearch  = async term => (await api(`/search?term=${encodeURIComponent(term)}&limit=100&entity=musicArtist,album,song`)).results || [];
-const apiPopular = async () => (await api('/popular')).results || [];
-const apiLookup  = async (id, entity) => (await api(`/lookup?id=${cleanId(id)}&entity=${entity}`)).results || [];
-const apiQueueAdd = body => api('/download/add', { method:'POST', body: JSON.stringify({ quality:'320', skipExisting:true, ...body }) });
-async function apiCrawlStatus(trackId){
+const apiSearch    = async term => (await api(`/search?term=${encodeURIComponent(term)}&limit=100&entity=musicArtist,album,song`)).results || [];
+const apiPopular   = async ()   => (await api('/popular')).results || [];
+const apiLookup    = async (id, entity) => (await api(`/lookup?id=${cleanId(id)}&entity=${entity}`)).results || [];
+const apiLyrics    = id => api(`/lyrics/get?id=${cleanId(id)}`);
+const apiQueueAdd  = body => api('/download/add', {
+  method:'POST',
+  body: JSON.stringify({ quality:'320', skipExisting:true, ...body })
+});
+
+/**
+ * Query the crawl queue for a given track.
+ *
+ * Returns:
+ *   - `{...download, found:true}`  → the job is present in the server queue
+ *   - `{download_status:'completed', percent:100, found:false}` → the job is
+ *       NOT in the queue. Per server semantics this means it already finished
+ *       (removed from queue on success). Only returned when
+ *       `assumeCompletedIfMissing` is set.
+ *   - `null` → the request failed (network error, unknown state) OR the item
+ *       is simply not in the queue and we should not guess.
+ *
+ * @param {string|number} trackId
+ * @param {{assumeCompletedIfMissing?:boolean}} [opts]
+ */
+async function apiCrawlStatus(trackId, opts = {}){
+  const { assumeCompletedIfMissing = false } = opts;
+  let r;
   try {
-    const r = await api(`/download/status?trackId=${cleanId(trackId)}`);
-    if (!r) return null;
-    if (r.download) return r.download;
-    if (r.success && r.status) return r;
-    return null;
-  } catch { return null; }
+    r = await api(`/download/status?trackId=${cleanId(trackId)}`);
+  } catch {
+    return null; // network error → unknown
+  }
+  if (!r) {
+    return assumeCompletedIfMissing
+      ? { download_status:'completed', percent:100, found:false }
+      : null;
+  }
+  if (r.download) return { ...r.download, found:true };
+  if (r.success && r.status) return { ...r, found:true };
+
+  // Server responded but gave no queue entry.
+  if (assumeCompletedIfMissing) {
+    return { download_status:'completed', percent:100, found:false };
+  }
+  return null;
 }
-const apiLyrics = id => api(`/lyrics/get?id=${cleanId(id)}`);
 
 /* ══════════════════════════════════════════════════════════════
    5 · ITEM MODEL
@@ -812,8 +859,8 @@ const TYPE_MAP = {
   album:'collection', collection:'collection',
   song:'track', track:'track'
 };
-const itemType  = it => TYPE_MAP[it?.wrapperType] || it?.wrapperType || '';
-const itemId    = it => it?.trackId || it?.collectionId || it?.artistId || '';
+const itemType = it => TYPE_MAP[it?.wrapperType] || it?.wrapperType || '';
+const itemId   = it => it?.trackId || it?.collectionId || it?.artistId || '';
 
 function getArtwork(it, size=300){
   const urls = it?.attachments?.artworkUrls;
@@ -888,8 +935,8 @@ async function refreshCacheIndex(){
 const isCached = id => cachedIds.has(String(id));
 
 /* ══════════════════════════════════════════════════════════════
-   7 · DOWNLOAD MANAGER ★★★
-   Central registry for every crawl / save. Persisted to LS.
+   7 · DOWNLOAD MANAGER
+   Central registry for every crawl / save. Persisted to localStorage.
    ══════════════════════════════════════════════════════════════ */
 const DL = {
   items: [],
@@ -899,7 +946,7 @@ const DL = {
 
   load(){
     const raw = ls.get(KEY.downloads, []);
-    // Any item that was mid-save when the app closed is now interrupted.
+    // Any item mid-save when the app closed is now interrupted.
     this.items = raw.map(it => {
       if (it.status === 'saving') return { ...it, status:'paused', percent:0, error:'Interrupted' };
       return it;
@@ -908,11 +955,11 @@ const DL = {
   },
   persist(){ ls.set(KEY.downloads, this.items); },
 
-  all(){ return this.items; },
+  all(){    return this.items; },
   active(){ return this.items.filter(i => ['queued','crawling','saving'].includes(i.status)); },
-  ready(){ return this.items.filter(i => i.status === 'ready'); },
+  ready(){  return this.items.filter(i => i.status === 'ready'); },
   failed(){ return this.items.filter(i => ['failed','paused'].includes(i.status)); },
-  get(id){ return this.items.find(i => String(i.trackId) === String(id)); },
+  get(id){  return this.items.find(i => String(i.trackId) === String(id)); },
 
   notify(){
     this.persist();
@@ -963,10 +1010,7 @@ const DL = {
     this.notify();
   },
 
-  clearAll(){
-    this.items = [];
-    this.notify();
-  },
+  clearAll(){ this.items = []; this.notify(); },
 
   /* ── add a new job ── */
   async add(track, type = 'crawl') {
@@ -1008,7 +1052,7 @@ const DL = {
     // Otherwise queue a server crawl.
     try {
       await apiQueueAdd({ trackId: cleanId(id) });
-      this.update(id, { status: 'queued', percent: 0 });
+      this.update(id, { status: 'queued', percent: 0, addedAt: Date.now() });
       this._ensureTimer();
     } catch (e) {
       this.update(id, { status: 'failed', error: e.message });
@@ -1020,7 +1064,7 @@ const DL = {
     const it = this.get(id); if (!it) return;
     const track = getCached('track', id) || (await this._fetchTrack(id));
     if (!track) { toast('Track unavailable', 'danger'); return; }
-    this.update(id, { status:'queued', error:'', percent:0 });
+    this.update(id, { status:'queued', error:'', percent:0, addedAt: Date.now() });
 
     // If we already have the audio and were saving, resume save
     if (it.type === 'save' && hasAudio(track)) {
@@ -1125,57 +1169,84 @@ const DL = {
     }
   },
 
+  /* ── crawl→ready or crawl→save transition ── */
+  async _markCompleted(id, item){
+    const fresh = await this._fetchTrack(id);
+    if (!fresh || !hasAudio(fresh)){
+      // Server says done but audio is not yet exposed — keep polling.
+      this.update(id, { status: 'crawling', percent: 100 });
+      return;
+    }
+    if (item.type === 'save'){
+      this.update(id, { status:'saving', percent:0 });
+      this._runSave(id, fresh).catch(e =>
+        this.update(id, { status:'failed', error: e.message })
+      );
+    } else {
+      this.update(id, { status:'ready', percent:100 });
+    }
+  },
+
+  /**
+   * Poll loop for queued/crawling items.
+   *
+   * KEY BEHAVIOUR: if the API reports success but the item is no longer in the
+   * queue, we treat it as COMPLETED at 100%. This is the documented server
+   * semantics for the crawler queue (items are removed on success).
+   */
   _ensureTimer(){
     if (this.timer) return;
-    const tick = async () => {
-      const crawls = this.items.filter(i => ['queued','crawling'].includes(i.status));
-      if (!crawls.length){
-        clearInterval(this.timer); this.timer = null;
-        return;
-      }
-      for (const item of crawls){
-        const id = String(item.trackId);
-        const status = await apiCrawlStatus(id);
-        if (!status) continue;
-        const s = status.download_status;
-        const pct = Math.max(0, Math.min(100, Math.round(Number(status.percent) || 0)));
 
-        if (s === 'completed'){
-          // Refetch to get audio URLs
-          const fresh = await this._fetchTrack(id);
-          if (fresh && hasAudio(fresh)){
-            if (item.type === 'save'){
-              // Auto-save
-              this.update(id, { status:'saving', percent:0 });
-              this._runSave(id, fresh).catch(e => this.update(id, { status:'failed', error: e.message }));
-            } else {
-              // Crawl only — mark ready
-              this.update(id, { status:'ready', percent:100 });
-            }
-          } else {
-            // No audio yet, keep polling briefly
-            this.update(id, { percent: pct, status:'crawling' });
-          }
-        } else if (s === 'failed' || s === 'stopped'){
-          this.update(id, { status:'failed', error: status.error || 'Failed' });
-        } else {
-          this.update(id, { status:'crawling', percent: pct });
+    let running = false;
+    const tick = async () => {
+      if (running) return; // avoid overlapping async ticks
+      running = true;
+      try {
+        const crawls = this.items.filter(i => ['queued','crawling'].includes(i.status));
+        if (!crawls.length){
+          clearInterval(this.timer); this.timer = null;
+          return;
         }
+
+        for (const item of crawls){
+          const id = String(item.trackId);
+          const status = await apiCrawlStatus(id, { assumeCompletedIfMissing: true });
+
+          // Network error — leave item as-is and try again next tick.
+          if (!status) continue;
+
+          // Not found in queue → completed, but honour a short grace period
+          // so we don't race the server right after the job was queued.
+          const notFound = status.found === false;
+          if (notFound && (Date.now() - (item.addedAt || 0)) < QUEUE_GRACE_MS) continue;
+
+          const s   = status.download_status;
+          const pct = Math.max(0, Math.min(100, Math.round(Number(status.percent) || 0)));
+
+          if (notFound || s === 'completed'){
+            await this._markCompleted(id, item);
+          } else if (s === 'failed' || s === 'stopped'){
+            this.update(id, { status:'failed', error: status.error || 'Failed' });
+          } else {
+            this.update(id, { status:'crawling', percent: pct });
+          }
+        }
+      } finally {
+        running = false;
       }
     };
+
     tick();
     this.timer = setInterval(tick, POLL_MS);
   }
 };
 
-/* keep polling if there are queued items on boot */
+/* Keep polling if there are queued items on boot. */
 function resumeDownloadPolling(){
   if (DL.items.some(i => ['queued','crawling'].includes(i.status))) DL._ensureTimer();
 }
 function updateDownloadBadges(){
-  const active = DL.active().length;
-  const ready = DL.ready().length;
-  const total = active + ready;
+  const total = DL.active().length + DL.ready().length;
 
   const ind = $('#dlIndicator');
   const indCount = $('#dlIndicatorCount');
@@ -1194,7 +1265,7 @@ function updateDownloadBadges(){
    8 · LIKES
    ══════════════════════════════════════════════════════════════ */
 const getLikes = () => ls.get(KEY.likes, []);
-const isLiked = id => getLikes().some(t => String(t.trackId) === String(id));
+const isLiked  = id => getLikes().some(t => String(t.trackId) === String(id));
 
 function makeLikeEntry(item){
   return {
@@ -1218,13 +1289,21 @@ function toggleLike(item){
   ls.set(KEY.likes, likes);
   haptic(8);
   refreshLikes();
-  if (location.hash.startsWith('#/library') && !location.hash.includes('playlists') && !location.hash.includes('downloads')){
+  if (location.hash.startsWith('#/library')
+      && !location.hash.includes('playlists')
+      && !location.hash.includes('downloads')){
     viewLikes();
   }
 }
 async function toggleLikeById(id){
   let it = getCached('track', id);
-  if (!it){ try { const r = await apiLookup(id, 'song'); it = r.find(x => itemType(x) === 'track') || r[0]; if (it) cacheItems([it]); } catch {} }
+  if (!it){
+    try {
+      const r = await apiLookup(id, 'song');
+      it = r.find(x => itemType(x) === 'track') || r[0];
+      if (it) cacheItems([it]);
+    } catch {}
+  }
   if (it) toggleLike(it); else toast('Track not available', 'danger');
 }
 function refreshLikes(){
@@ -1232,25 +1311,31 @@ function refreshLikes(){
     const id = btn.dataset.like; if (!id) return;
     const on = isLiked(id);
     btn.classList.toggle('liked', on);
-    const i = btn.querySelector('i'); if (i) i.className = `bi ${on ? 'bi-heart-fill' : 'bi-heart'}`;
+    const i = btn.querySelector('i');
+    if (i) i.className = `bi ${on ? 'bi-heart-fill' : 'bi-heart'}`;
   });
   const fpBtn = $('#fpLikeBtn');
   if (fpBtn){
     const id = Player.track?.trackId;
-    fpBtn.classList.toggle('liked', id ? isLiked(id) : false);
+    const on = id ? isLiked(id) : false;
+    fpBtn.classList.toggle('liked', on);
     const i = $('#fpLike');
-    if (i) i.className = `bi ${id && isLiked(id) ? 'bi-heart-fill' : 'bi-heart'}`;
+    if (i) i.className = `bi ${on ? 'bi-heart-fill' : 'bi-heart'}`;
   }
 }
 
 /* ══════════════════════════════════════════════════════════════
    9 · PLAYLISTS
    ══════════════════════════════════════════════════════════════ */
-const getPlaylists = () => ls.get(KEY.pls, []);
+const getPlaylists  = () => ls.get(KEY.pls, []);
 const savePlaylists = p => ls.set(KEY.pls, p);
+
 function createPlaylist(name){
   name = (name || '').trim(); if (!name) return null;
-  const pl = { id:'pl_' + Date.now().toString(36) + Math.random().toString(36).slice(2,6), name, tracks:[], createdAt: Date.now() };
+  const pl = {
+    id:'pl_' + Date.now().toString(36) + Math.random().toString(36).slice(2,6),
+    name, tracks:[], createdAt: Date.now()
+  };
   const all = getPlaylists(); all.push(pl); savePlaylists(all);
   toast(`Created "${name}"`);
   return pl;
@@ -1258,7 +1343,9 @@ function createPlaylist(name){
 function addToPlaylist(plId, item){
   const all = getPlaylists();
   const pl = all.find(p => p.id === plId); if (!pl) return;
-  if (pl.tracks.some(t => String(t.trackId) === String(item.trackId))){ toast('Already in playlist', 'warning'); return; }
+  if (pl.tracks.some(t => String(t.trackId) === String(item.trackId))){
+    toast('Already in playlist', 'warning'); return;
+  }
   pl.tracks.push(makeLikeEntry(item));
   savePlaylists(all);
   toast(`Added to "${pl.name}"`);
@@ -1310,22 +1397,27 @@ function syncPlayerUI(){
   if (!t){ mini.classList.add('d-none'); document.title = 'MusicMan'; return; }
   mini.classList.remove('d-none');
 
-  const art = getArtwork(t, 300) || t.artworkUrl || '';
+  const art      = getArtwork(t, 300) || t.artworkUrl || '';
   const artSmall = getArtwork(t, 100) || t.artworkUrl || art;
 
   const mi = $('#miniArt');
   if (artSmall){ mi.src = artSmall; mi.style.visibility = 'visible'; }
   else { mi.removeAttribute('src'); mi.style.visibility = 'hidden'; }
-  $('#miniTitle').textContent = t.trackName || 'Track';
+  $('#miniTitle').textContent  = t.trackName  || 'Track';
   $('#miniArtist').textContent = t.artistName || '';
 
   const fi = $('#fpArt');
-  if (art){ fi.src = art; fi.classList.remove('fp-art-ph'); $('#fpBg').style.backgroundImage = `url("${art}")`; }
-  else { fi.removeAttribute('src'); fi.classList.add('fp-art-ph'); $('#fpBg').style.backgroundImage = ''; }
-  $('#fpTitle').textContent = t.trackName || 'Track';
+  if (art){
+    fi.src = art; fi.classList.remove('fp-art-ph');
+    $('#fpBg').style.backgroundImage = `url("${art}")`;
+  } else {
+    fi.removeAttribute('src'); fi.classList.add('fp-art-ph');
+    $('#fpBg').style.backgroundImage = '';
+  }
+  $('#fpTitle').textContent  = t.trackName  || 'Track';
   $('#fpArtist').textContent = t.artistName || '';
   $('#fpSource').textContent = t.collectionName || Player.source || 'MusicMan';
-  $('#fpDur').textContent = t.trackTimeMillis ? fmtTime(t.trackTimeMillis/1000) : '0:00';
+  $('#fpDur').textContent    = t.trackTimeMillis ? fmtTime(t.trackTimeMillis/1000) : '0:00';
 
   refreshLikes(); renderQueue(); syncPlayIcons(); syncSaveButton();
   document.title = `${t.trackName || 'MusicMan'} · MusicMan`;
@@ -1350,13 +1442,18 @@ function syncSaveButton(){
 function setSeekUI(pct){
   const bar = $('#miniBar'); if (bar) bar.style.width = pct + '%';
   const seek = $('#fpSeek');
-  if (seek && !Player.seeking){ seek.value = Math.round(pct*10); seek.style.setProperty('--p', pct + '%'); }
+  if (seek && !Player.seeking){
+    seek.value = Math.round(pct*10);
+    seek.style.setProperty('--p', pct + '%');
+  }
 }
 
 audio.addEventListener('play',  () => { Player.playing = true;  syncPlayIcons(); renderQueue(); syncSaveButton(); });
 audio.addEventListener('pause', () => { Player.playing = false; syncPlayIcons(); renderQueue(); });
 audio.addEventListener('ended', () => onTrackEnded());
-audio.addEventListener('loadedmetadata', () => { if (isFinite(audio.duration)) $('#fpDur').textContent = fmtTime(audio.duration); });
+audio.addEventListener('loadedmetadata', () => {
+  if (isFinite(audio.duration)) $('#fpDur').textContent = fmtTime(audio.duration);
+});
 audio.addEventListener('timeupdate', () => {
   const d = audio.duration; if (!d || !isFinite(d)) return;
   const pct = (audio.currentTime/d)*100;
@@ -1397,8 +1494,16 @@ async function playById(id){
   haptic(6);
   const cached = isCached(id);
   let it = getCached('track', id);
-  if (!it){ try { const r = await apiLookup(id, 'song'); it = r.find(x => itemType(x) === 'track') || r[0]; if (it) cacheItems([it]); } catch {} }
-  if (!it && cached){ it = { wrapperType:'track', trackId:String(id), trackName:'Cached track', artistName:'', attachments:{} }; }
+  if (!it){
+    try {
+      const r = await apiLookup(id, 'song');
+      it = r.find(x => itemType(x) === 'track') || r[0];
+      if (it) cacheItems([it]);
+    } catch {}
+  }
+  if (!it && cached){
+    it = { wrapperType:'track', trackId:String(id), trackName:'Cached track', artistName:'', attachments:{} };
+  }
   if (!it){ toast('Track not found', 'danger'); return; }
   playItem(it);
 }
@@ -1435,8 +1540,9 @@ function nextTrack(userInitiated = true){
   const q = Player.queue; if (!q.length) return;
   if (Player.repeat === 'one' && !userInitiated){ audio.currentTime = 0; audio.play().catch(()=>{}); return; }
   let next;
-  if (Player.shuffle && q.length > 1){ do { next = Math.floor(Math.random()*q.length); } while (next === Player.index); }
-  else {
+  if (Player.shuffle && q.length > 1){
+    do { next = Math.floor(Math.random()*q.length); } while (next === Player.index);
+  } else {
     next = Player.index + 1;
     if (next >= q.length){
       if (Player.repeat === 'all') next = 0;
@@ -1491,7 +1597,10 @@ window.addEventListener('popstate', () => {
   const area = $('#fpDrag'), fp = $('#full');
   if (!area || !fp) return;
   let startY = 0, dy = 0, dragging = false;
-  area.addEventListener('touchstart', e => { dragging = true; startY = e.touches[0].clientY; dy = 0; fp.style.transition = 'none'; }, { passive: true });
+  area.addEventListener('touchstart', e => {
+    dragging = true; startY = e.touches[0].clientY; dy = 0;
+    fp.style.transition = 'none';
+  }, { passive: true });
   area.addEventListener('touchmove', e => {
     if (!dragging) return;
     dy = Math.max(0, e.touches[0].clientY - startY);
@@ -1511,14 +1620,16 @@ window.addEventListener('popstate', () => {
 (function initSeek(){
   const fpSeek = $('#fpSeek');
   fpSeek?.addEventListener('pointerdown', () => { Player.seeking = true; });
-  fpSeek?.addEventListener('pointerup', () => { Player.seeking = false; });
+  fpSeek?.addEventListener('pointerup',   () => { Player.seeking = false; });
   fpSeek?.addEventListener('input', e => {
     const pct = Number(e.target.value)/10;
     e.target.style.setProperty('--p', pct + '%');
-    if (audio.duration && isFinite(audio.duration)) $('#fpCur').textContent = fmtTime((pct/100) * audio.duration);
+    if (audio.duration && isFinite(audio.duration))
+      $('#fpCur').textContent = fmtTime((pct/100) * audio.duration);
   });
   fpSeek?.addEventListener('change', e => {
-    if (audio.duration && isFinite(audio.duration)) audio.currentTime = (Number(e.target.value)/1000) * audio.duration;
+    if (audio.duration && isFinite(audio.duration))
+      audio.currentTime = (Number(e.target.value)/1000) * audio.duration;
     Player.seeking = false;
   });
 
@@ -1571,7 +1682,13 @@ async function playIds(csv){
   const items = [];
   for (const id of ids){
     let it = getCached('track', id);
-    if (!it){ try { const r = await apiLookup(id, 'song'); it = r.find(x => itemType(x) === 'track') || r[0]; if (it) cacheItems([it]); } catch {} }
+    if (!it){
+      try {
+        const r = await apiLookup(id, 'song');
+        it = r.find(x => itemType(x) === 'track') || r[0];
+        if (it) cacheItems([it]);
+      } catch {}
+    }
     if (!it && isCached(id)) it = { wrapperType:'track', trackId:String(id), trackName:'Cached track', artistName:'', attachments:{} };
     if (it) items.push(it);
   }
@@ -1615,8 +1732,7 @@ async function saveCurrentTrack(){
     toast('Already downloading', 'warning');
     return;
   }
-  // Pull the freshest record we have
-  let fresh = getCached('track', id) || t;
+  const fresh = getCached('track', id) || t;
   await DL.add(fresh, 'save');
   syncSaveButton();
 }
@@ -1632,15 +1748,21 @@ async function openTrackMenu(trackId, playlistId){
   menuCtx.playlistId = playlistId || null;
 
   let it = getCached('track', trackId);
-  if (!it){ try { const r = await apiLookup(trackId, 'song'); it = r.find(x => itemType(x) === 'track') || r[0]; if (it) cacheItems([it]); } catch {} }
+  if (!it){
+    try {
+      const r = await apiLookup(trackId, 'song');
+      it = r.find(x => itemType(x) === 'track') || r[0];
+      if (it) cacheItems([it]);
+    } catch {}
+  }
   if (!it){ toast('Track not available', 'danger'); return; }
 
   const id = String(trackId);
-  const liked = isLiked(id);
-  const cached = isCached(id);
+  const liked   = isLiked(id);
+  const cached  = isCached(id);
   const crawled = hasAudio(it);
-  const dl = DL.get(id);
-  const art = getArtwork(it, 100);
+  const dl      = DL.get(id);
+  const art     = getArtwork(it, 100);
 
   const rows = [];
   rows.push(`<button class="sheet-item" onclick="menuAction('details')"><i class="bi bi-info-circle"></i><span>Track details</span></button>`);
@@ -1650,7 +1772,6 @@ async function openTrackMenu(trackId, playlistId){
   rows.push(`<button class="sheet-item" onclick="menuAction('like')"><i class="bi ${liked ? 'bi-heart-fill text-danger' : 'bi-heart'}"></i><span>${liked ? 'Remove from Liked' : 'Add to Liked'}</span></button>`);
   rows.push(`<button class="sheet-item" onclick="menuAction('playlist')"><i class="bi bi-plus-circle"></i><span>Add to playlist</span></button>`);
 
-  // Smart download actions
   if (dl && ['queued','crawling','saving'].includes(dl.status)){
     rows.push(`<button class="sheet-item" onclick="menuAction('openDl')"><i class="bi bi-cloud-arrow-down text-info"></i><span>View download progress</span></button>`);
     rows.push(`<button class="sheet-item danger" onclick="menuAction('cancelDl')"><i class="bi bi-x-circle"></i><span>Cancel download</span></button>`);
@@ -1662,11 +1783,11 @@ async function openTrackMenu(trackId, playlistId){
     rows.push(`<button class="sheet-item" onclick="menuAction('save')"><i class="bi bi-download"></i><span>Download offline</span></button>`);
   } else {
     rows.push(`<button class="sheet-item" onclick="menuAction('crawl')"><i class="bi bi-cloud-arrow-down text-primary"></i><span>Crawl audio</span></button>`);
-    rows.push(`<button class="sheet-item" onclick="menuAction('crawl_save')"><i class="bi bi-cloud-download text-primary"></i><span>Crawl & save offline</span></button>`);
+    rows.push(`<button class="sheet-item" onclick="menuAction('crawl_save')"><i class="bi bi-cloud-download text-primary"></i><span>Crawl &amp; save offline</span></button>`);
   }
 
   if (it.collectionId) rows.push(`<button class="sheet-item" onclick="menuAction('album')"><i class="bi bi-disc"></i><span>Go to album</span></button>`);
-  if (it.artistId) rows.push(`<button class="sheet-item" onclick="menuAction('artist')"><i class="bi bi-person"></i><span>Go to artist</span></button>`);
+  if (it.artistId)     rows.push(`<button class="sheet-item" onclick="menuAction('artist')"><i class="bi bi-person"></i><span>Go to artist</span></button>`);
   if (menuCtx.playlistId) rows.push(`<button class="sheet-item danger" onclick="menuAction('removeFromPl')"><i class="bi bi-x-circle"></i><span>Remove from playlist</span></button>`);
 
   $('#sheetTrackBody').innerHTML = `
@@ -1690,15 +1811,20 @@ async function menuAction(action){
   if (!id) return;
 
   let it = getCached('track', id);
-  if (!it){ try { const r = await apiLookup(id, 'song'); it = r.find(x => itemType(x) === 'track') || r[0]; if (it) cacheItems([it]); } catch {} }
+  if (!it){
+    try {
+      const r = await apiLookup(id, 'song');
+      it = r.find(x => itemType(x) === 'track') || r[0];
+      if (it) cacheItems([it]);
+    } catch {}
+  }
 
   switch (action){
     case 'details':  go('#/track/' + id); break;
     case 'play':     playById(id); break;
     case 'next': {
       if (!it) return;
-      const at = Player.index + 1;
-      Player.queue.splice(at, 0, it);
+      Player.queue.splice(Player.index + 1, 0, it);
       toast('Playing next'); renderQueue(); break;
     }
     case 'queue': {
@@ -1708,16 +1834,16 @@ async function menuAction(action){
       if (Player.index < 0) Player.index = 0;
       toast('Added to queue'); renderQueue(); break;
     }
-    case 'like':     toggleLikeById(id); break;
-    case 'playlist': openPlaylistPicker(id); break;
-    case 'crawl':    if (it) await DL.add(it, 'crawl'); toast('Crawl queued'); break;
-    case 'crawl_save': if (it) await DL.add(it, 'save'); toast('Crawl & save queued'); break;
-    case 'save':     await DL.saveNow(id); break;
-    case 'uncache':  await removeCached(id); break;
-    case 'openDl':   go('#/library/downloads'); break;
-    case 'cancelDl': DL.remove(id); toast('Cancelled'); break;
-    case 'album':    if (it?.collectionId) go('#/album/' + it.collectionId); break;
-    case 'artist':   if (it?.artistId) go('#/artist/' + it.artistId); break;
+    case 'like':       toggleLikeById(id); break;
+    case 'playlist':   openPlaylistPicker(id); break;
+    case 'crawl':      if (it) await DL.add(it, 'crawl'); toast('Crawl queued'); break;
+    case 'crawl_save': if (it) await DL.add(it, 'save');  toast('Crawl & save queued'); break;
+    case 'save':       await DL.saveNow(id); break;
+    case 'uncache':    await removeCached(id); break;
+    case 'openDl':     go('#/library/downloads'); break;
+    case 'cancelDl':   DL.remove(id); toast('Cancelled'); break;
+    case 'album':      if (it?.collectionId) go('#/album/' + it.collectionId); break;
+    case 'artist':     if (it?.artistId) go('#/artist/' + it.artistId); break;
     case 'removeFromPl': if (plId){ removeFromPlaylist(plId, id); toast('Removed'); } break;
   }
 }
@@ -1751,7 +1877,13 @@ function openPlaylistPicker(trackId){
 async function pickPlaylist(plId){
   if (!pickerTrackId) return;
   let it = getCached('track', pickerTrackId);
-  if (!it){ try { const r = await apiLookup(pickerTrackId, 'song'); it = r.find(x => itemType(x) === 'track') || r[0]; if (it) cacheItems([it]); } catch {} }
+  if (!it){
+    try {
+      const r = await apiLookup(pickerTrackId, 'song');
+      it = r.find(x => itemType(x) === 'track') || r[0];
+      if (it) cacheItems([it]);
+    } catch {}
+  }
   if (!it){ toast('Track not available', 'danger'); return; }
   addToPlaylist(plId, it);
   sheet('#sheetPl').hide();
@@ -1765,29 +1897,40 @@ async function newPlaylistPrompt(){
   if (!pl) return;
   if (pickerTrackId){
     let it = getCached('track', pickerTrackId);
-    if (!it){ try { const r = await apiLookup(pickerTrackId, 'song'); it = r.find(x => itemType(x) === 'track') || r[0]; if (it) cacheItems([it]); } catch {} }
+    if (!it){
+      try {
+        const r = await apiLookup(pickerTrackId, 'song');
+        it = r.find(x => itemType(x) === 'track') || r[0];
+        if (it) cacheItems([it]);
+      } catch {}
+    }
     if (it) addToPlaylist(pl.id, it);
   }
   if (location.hash.startsWith('#/library/playlists')) go('#/library/playlists/' + pl.id);
 }
 
 /* ══════════════════════════════════════════════════════════════
-   14 · CRAWL / DOWNLOAD ACTIONS  (thin wrappers over DL)
+   14 · CRAWL / DOWNLOAD ACTIONS
    ══════════════════════════════════════════════════════════════ */
 async function startCrawl(trackId, btn, autoSave = false){
   if (btn){ btn.disabled = true; btn.innerHTML = '<span class="spinner-border spinner-border-sm"></span>'; }
   try {
     let it = getCached('track', trackId);
-    if (!it){ try { const r = await apiLookup(trackId, 'song'); it = r.find(x => itemType(x) === 'track') || r[0]; if (it) cacheItems([it]); } catch {} }
+    if (!it){
+      try {
+        const r = await apiLookup(trackId, 'song');
+        it = r.find(x => itemType(x) === 'track') || r[0];
+        if (it) cacheItems([it]);
+      } catch {}
+    }
     if (!it){ toast('Track unavailable', 'danger'); return; }
     await DL.add(it, autoSave ? 'save' : 'crawl');
     toast(autoSave ? 'Crawl & save queued' : 'Crawl queued');
     haptic(12);
-    // Refresh any visible crawl card
     if (location.hash === `#/track/${trackId}`) {
-      const status = await apiCrawlStatus(trackId);
+      const status = await apiCrawlStatus(trackId, { assumeCompletedIfMissing: true });
       renderCrawlCard(it, status);
-      startPoller(trackId);
+      startTrackPoller(trackId);
     }
   } catch (e){
     toast('Crawl failed: ' + e.message, 'danger');
@@ -1804,7 +1947,7 @@ async function crawlAll(type, id, btn){
     else if (type === 'collection') body.albumId = cleanId(id);
     else if (type === 'artist') body.artistId = cleanId(id);
     const r = await apiQueueAdd(body);
-    const added = r.added_count ?? r.added ?? 0;
+    const added   = r.added_count   ?? r.added   ?? 0;
     const skipped = r.skipped_count ?? r.skipped ?? 0;
     toast(`Queued ${added}${skipped ? ` · ${skipped} skipped` : ''}`);
     haptic(12);
@@ -1818,7 +1961,13 @@ async function saveTrack(trackId, btn){
   if (btn){ btn.disabled = true; btn.innerHTML = '<span class="spinner-border spinner-border-sm"></span>'; }
   try {
     let it = getCached('track', trackId);
-    if (!it){ try { const r = await apiLookup(trackId, 'song'); it = r.find(x => itemType(x) === 'track') || r[0]; if (it) cacheItems([it]); } catch {} }
+    if (!it){
+      try {
+        const r = await apiLookup(trackId, 'song');
+        it = r.find(x => itemType(x) === 'track') || r[0];
+        if (it) cacheItems([it]);
+      } catch {}
+    }
     if (!it){ toast('Track unavailable', 'danger'); return; }
     if (isCached(trackId)){ toast('Already offline'); return; }
     await DL.add(it, 'save');
@@ -1887,6 +2036,9 @@ window.addEventListener('hashchange', route);
 
 async function route(){
   closeAllSheets();
+  // Detach any per-view DL subscription so it doesn't linger after navigating away.
+  if (typeof dlUnsubscribe === 'function' && dlUnsubscribe) { dlUnsubscribe(); dlUnsubscribe = null; }
+
   const { parts, q } = parseHash();
   updateNav(parts);
   showSkeleton();
@@ -1991,16 +2143,15 @@ function cardArtist(a){
 /* ── TRACK ROW ── */
 function trackRow(item, opts = {}){
   const id = String(item.trackId || '');
-  const liked = isLiked(id);
-  const cached = isCached(id);
+  const liked   = isLiked(id);
+  const cached  = isCached(id);
   const crawled = hasAudio(item);
-  const dl = DL.get(id);
-  const art = getArtwork(item, 100);
-  const dur = item.trackTimeMillis ? fmtTime(item.trackTimeMillis / 1000) : '';
-  const sub = [item.artistName, dur].filter(Boolean).join(' · ');
+  const dl      = DL.get(id);
+  const art     = getArtwork(item, 100);
+  const dur     = item.trackTimeMillis ? fmtTime(item.trackTimeMillis / 1000) : '';
+  const sub     = [item.artistName, dur].filter(Boolean).join(' · ');
   const isCurrent = Player.track && String(Player.track.trackId) === id;
 
-  // State badge
   let badge = '';
   if (cached) badge = `<i class="bi bi-cloud-check-fill text-success ms-1" style="font-size:.7rem" title="Offline"></i>`;
   else if (dl && ['queued','crawling','saving'].includes(dl.status))
@@ -2012,7 +2163,6 @@ function trackRow(item, opts = {}){
   else
     badge = `<i class="bi bi-cloud text-secondary ms-1" style="font-size:.7rem" title="Not crawled"></i>`;
 
-  // Right-side quick action
   let quick = '';
   if (dl && ['queued','crawling','saving'].includes(dl.status)){
     quick = `<button class="icon-btn sm text-info" onclick="go('#/library/downloads')" aria-label="Progress">
@@ -2091,7 +2241,7 @@ async function viewHome(){
     html += `<div class="hscroll">${tracks.map(cardTrack).join('')}</div>`;
   }
   if (artists.length){ html += secTitle('Popular Artists'); html += `<div class="hscroll">${artists.map(cardArtist).join('')}</div>`; }
-  if (albums.length){ html += secTitle('Popular Albums'); html += `<div class="hscroll">${albums.map(cardAlbum).join('')}</div>`; }
+  if (albums.length) { html += secTitle('Popular Albums');  html += `<div class="hscroll">${albums.map(cardAlbum).join('')}</div>`; }
   if (!items.length && !recents.length) html += emptyState('collection', 'Nothing to show yet', 'Try searching for something.');
 
   html += `</div>`;
@@ -2166,8 +2316,8 @@ async function viewSearch(term){
   const albums  = items.filter(i => itemType(i) === 'collection');
   const tracks  = items.filter(i => itemType(i) === 'track');
 
-  const showTracks = searchFilter === 'all' || searchFilter === 'track';
-  const showAlbums = searchFilter === 'all' || searchFilter === 'album';
+  const showTracks  = searchFilter === 'all' || searchFilter === 'track';
+  const showAlbums  = searchFilter === 'all' || searchFilter === 'album';
   const showArtists = searchFilter === 'all' || searchFilter === 'artist';
 
   let html = `<div class="pb-4">${searchBarHtml(term)}`;
@@ -2254,10 +2404,10 @@ async function viewAlbum(id){
   const tracks = (await apiLookup(id, 'song')).filter(x => itemType(x) === 'track');
   cacheItems(tracks);
 
-  const art = getArtwork(album, 600);
+  const art     = getArtwork(album, 600);
   const missing = tracks.filter(t => !hasAudio(t) && !isCached(t.trackId)).length;
-  const ids = tracks.map(t => String(t.trackId)).join(',');
-  const year = album.releaseDate ? new Date(album.releaseDate).getFullYear() : '';
+  const ids     = tracks.map(t => String(t.trackId)).join(',');
+  const year    = album.releaseDate ? new Date(album.releaseDate).getFullYear() : '';
 
   let html = `<div class="pb-4">`;
   html += backBtn(album.artistId ? `#/artist/${album.artistId}` : '#/');
@@ -2308,11 +2458,13 @@ async function viewTrack(id){
 
   renderTrackPage(track);
 
-  // Only poll if actively crawling (DL knows best) or we have no audio yet
   const dl = DL.get(id);
   const crawling = dl && ['queued','crawling'].includes(dl.status);
+
+  // Only ask the server when we actually expect progress (queued/crawling),
+  // or when nothing is available locally yet.
   if (crawling || (!hasAudio(track) && !isCached(id))){
-    const status = await apiCrawlStatus(id);
+    const status = await apiCrawlStatus(id, { assumeCompletedIfMissing: false });
     renderCrawlCard(track, status);
     if (crawling || (status && ['pending','downloading'].includes(status.download_status))) {
       startTrackPoller(id);
@@ -2325,13 +2477,13 @@ async function viewTrack(id){
 function renderTrackPage(track){
   const id = String(track.trackId);
   const art = getArtwork(track, 600);
-  const liked = isLiked(id);
-  const cached = isCached(id);
+  const liked   = isLiked(id);
+  const cached  = isCached(id);
   const crawled = hasAudio(track);
   const playable = crawled || cached;
-  const dur = track.trackTimeMillis ? fmtTime(track.trackTimeMillis/1000) : '';
+  const dur  = track.trackTimeMillis ? fmtTime(track.trackTimeMillis/1000) : '';
   const year = track.releaseDate ? new Date(track.releaseDate).getFullYear() : '';
-  const dl = DL.get(id);
+  const dl   = DL.get(id);
 
   let html = `<div class="pb-4">`;
   html += backBtn(track.artistId ? `#/artist/${track.artistId}` : '#/');
@@ -2348,12 +2500,12 @@ function renderTrackPage(track){
     </div>
   </div>`;
 
-  // Action bar — dynamic based on state
   let primaryBtn = '';
   if (dl && ['queued','crawling','saving'].includes(dl.status)){
+    const label = dl.status === 'queued' ? 'Queued' : dl.status === 'crawling' ? 'Crawling' : 'Saving';
     primaryBtn = `<button class="pill-btn" style="background:rgba(var(--bs-info-rgb),.15);color:var(--bs-info)" onclick="go('#/library/downloads')">
       <span class="spinner-border spinner-border-sm me-1" style="width:14px;height:14px;border-width:2px"></span>
-      ${dl.status === 'queued' ? 'Queued' : dl.status === 'crawling' ? 'Crawling' : 'Saving'} ${dl.percent ? dl.percent + '%' : ''}
+      ${label} ${dl.percent ? dl.percent + '%' : ''}
     </button>`;
   } else if (!playable){
     primaryBtn = `<button class="pill-btn primary" onclick="startCrawl('${esc(id)}', this)">
@@ -2410,8 +2562,8 @@ function renderCrawlCard(track, status){
   const el = $('#crawlCard'); if (!el) return;
   const id = String(track.trackId);
   const crawled = hasAudio(track);
-  const cached = isCached(id);
-  const dl = DL.get(id);
+  const cached  = isCached(id);
+  const dl      = DL.get(id);
 
   if (cached){
     el.innerHTML = `<div class="crawl-card ready">
@@ -2427,7 +2579,6 @@ function renderCrawlCard(track, status){
     return;
   }
 
-  // Download in progress (either crawl or save)
   if (dl && ['queued','crawling','saving'].includes(dl.status)){
     const isSaving = dl.status === 'saving';
     const label = dl.status === 'queued' ? 'Queued' : isSaving ? 'Saving to offline' : 'Crawling audio';
@@ -2473,7 +2624,6 @@ function renderCrawlCard(track, status){
     return;
   }
 
-  // No download in DL but has audio (crawled externally)
   if (crawled){
     el.innerHTML = `<div class="crawl-card ready">
       <i class="bi bi-check-circle-fill text-success" style="font-size:1.5rem"></i>
@@ -2488,7 +2638,6 @@ function renderCrawlCard(track, status){
     return;
   }
 
-  // No audio at all
   el.innerHTML = `<div class="crawl-card idle">
     <i class="bi bi-cloud-arrow-down text-primary" style="font-size:1.7rem"></i>
     <div class="cc-body">
@@ -2515,9 +2664,10 @@ function startTrackPoller(trackId){
     if (String(cur) !== tid){ stopTrackPoller(); return; }
 
     const dl = DL.get(tid);
-    const status = await apiCrawlStatus(tid);
+    // Use the same "not found = completed" semantics only when the DL manager
+    // is already tracking this item (i.e. we know it was queued).
+    const status = await apiCrawlStatus(tid, { assumeCompletedIfMissing: !!dl });
 
-    // If DL says it's done or has moved on, refetch track
     if (!status || status.download_status === 'completed' || (dl && dl.status === 'saving')){
       try {
         const fresh = await apiLookup(tid, 'song');
@@ -2530,7 +2680,6 @@ function startTrackPoller(trackId){
           }
         }
       } catch {}
-      // Continue polling if DL still active (crawl→save transition)
       if (dl && ['queued','crawling','saving'].includes(dl.status)) return;
       stopTrackPoller();
       return;
@@ -2553,15 +2702,15 @@ async function loadLyrics(trackId){
     const L = r?.lyrics || r?.result || r?.data;
     if (typeof L === 'string') text = L;
     else if (L){
-      if (typeof L.plain === 'string') text = L.plain;
+      if (typeof L.plain === 'string')       text = L.plain;
       else if (typeof L.lyrics === 'string') text = L.lyrics;
-      else if (typeof L.text === 'string') text = L.text;
+      else if (typeof L.text === 'string')   text = L.text;
       else if (typeof L.unsynced === 'string') text = L.unsynced;
-      else if (Array.isArray(L)) text = L.map(l => l.text || l.line || l.content || '').join('\n');
-      else if (Array.isArray(L.lines)) text = L.lines.map(l => l.text || l.line || '').join('\n');
+      else if (Array.isArray(L))             text = L.map(l => l.text || l.line || l.content || '').join('\n');
+      else if (Array.isArray(L.lines))       text = L.lines.map(l => l.text || l.line || '').join('\n');
     }
     if (!text && typeof r?.plain === 'string') text = r.plain;
-    if (!text && typeof r?.text === 'string') text = r.text;
+    if (!text && typeof r?.text === 'string')  text = r.text;
 
     if (!text){
       body.innerHTML = `<div class="text-secondary" style="font-size:.82rem">No lyrics available for this track.</div>`;
@@ -2719,21 +2868,15 @@ async function deletePlaylist(id){
 }
 
 /* ══════════════════════════════════════════════════════════════
-   23 · DOWNLOADS VIEW ★ (the offline tab)
+   23 · DOWNLOADS VIEW
    ══════════════════════════════════════════════════════════════ */
 let dlUnsubscribe = null;
 
 function renderDownloads(){
-  const active = DL.active();
-  const ready  = DL.ready();
-  const failed = DL.failed();
+  MAIN().innerHTML = libraryTabs('downloads')
+    + `<div id="dlContent"><div class="text-center py-4"><div class="spinner-border spinner-border-sm text-primary"></div></div></div>`;
 
-  let html = libraryTabs('downloads');
-
-  // Snapshot the cached list, render async
-  MAIN().innerHTML = html + `<div id="dlContent"><div class="text-center py-4"><div class="spinner-border spinner-border-sm text-primary"></div></div></div>`;
-
-  // Re-render on DL changes
+  // Re-render on DL changes while this view is mounted.
   if (dlUnsubscribe) dlUnsubscribe();
   dlUnsubscribe = DL.onChange(() => {
     if (location.hash.startsWith('#/library/downloads')) updateDlLists();
@@ -2754,25 +2897,19 @@ async function updateDlLists(){
 
   let html = '';
 
-  // Active downloads section
   if (active.length){
     html += `<h6 class="sec-title tight">Downloading · ${active.length}</h6>`;
     html += active.map(it => dlRowHtml(it)).join('');
   }
-
-  // Ready-to-save section (crawled but not yet saved)
   if (ready.length){
     html += `<h6 class="sec-title tight">Ready to save · ${ready.length}</h6>`;
     html += ready.map(it => dlRowHtml(it)).join('');
   }
-
-  // Failed section
   if (failed.length){
     html += `<h6 class="sec-title tight">Needs attention · ${failed.length}</h6>`;
     html += failed.map(it => dlRowHtml(it)).join('');
   }
 
-  // Finished downloads section header
   html += `<div class="d-flex align-items-center px-3 pt-4 pb-2">
     <div class="flex-grow-1">
       <div class="fw-bold">Available offline</div>
@@ -2870,9 +3007,7 @@ function dlRowHtml(it){
         <span class="dl-status ${statusClass}">${statusLabel}</span>
       </div>
       <div class="dl-sub text-truncate">${esc(it.artist || '')}${sizeInfo ? ' · ' + sizeInfo : ''}</div>
-      ${isActive ? `
-        <div class="dl-progress ${progressClass}"><div style="width:${pct}%"></div></div>
-      ` : ''}
+      ${isActive ? `<div class="dl-progress ${progressClass}"><div style="width:${pct}%"></div></div>` : ''}
       ${isFailed && it.error ? `<div class="dl-sub text-danger text-truncate">${esc(it.error)}</div>` : ''}
     </div>
     ${rightAction}
@@ -2903,7 +3038,7 @@ document.addEventListener('keydown', e => {
   if (tag === 'INPUT' || tag === 'TEXTAREA') return;
   if (e.code === 'Space'){ e.preventDefault(); togglePlay(); }
   if (e.key === 'ArrowRight' && audio.duration) audio.currentTime = Math.min(audio.currentTime + 5, audio.duration);
-  if (e.key === 'ArrowLeft' && audio.duration) audio.currentTime = Math.max(audio.currentTime - 5, 0);
+  if (e.key === 'ArrowLeft'  && audio.duration) audio.currentTime = Math.max(audio.currentTime - 5, 0);
   if (e.key === 'Escape' && $('#full')?.classList.contains('show')) closeFullPlayer();
 });
 document.addEventListener('click', e => {
@@ -2917,30 +3052,24 @@ document.addEventListener('click', e => {
 (async function boot(){
   applyTheme();
 
-  // Load persisted downloads, resume polling if needed
   DL.load();
   resumeDownloadPolling();
 
-  // Update download badges on DL state changes
   DL.onChange(() => {
     updateDownloadBadges();
-    // Update mini/full player save button in case the current track is downloading
     syncSaveButton();
-    // Update the current track page's crawl card if visible
+
     if (location.hash.startsWith('#/track/')){
       const id = location.hash.split('?')[0].split('/')[2];
       const dl = DL.get(id);
       const it = getCached('track', id);
       if (it && dl) renderCrawlCard(it, null);
     }
-    // Re-render library tab list if on it
     if (location.hash.startsWith('#/library/downloads')){
       updateDlLists();
     }
-    // Re-render track rows if on library / lists where rows show download state
     if (location.hash.startsWith('#/library') || location.hash.startsWith('#/search') ||
-        location.hash.startsWith('#/album') || location.hash.startsWith('#/artist')){
-      // Cheap: refresh like buttons only; full re-render would be jarring
+        location.hash.startsWith('#/album')   || location.hash.startsWith('#/artist')){
       refreshLikes();
     }
   });
