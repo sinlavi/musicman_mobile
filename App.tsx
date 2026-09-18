@@ -36,6 +36,7 @@ const MainContent: React.FC = () => {
     toggleLikeAll,
     playlists,
     createPlaylist,
+    addToPlaylist,
     removeFromPlaylist,
     deletePlaylist,
     renamePlaylist,
@@ -72,39 +73,7 @@ const MainContent: React.FC = () => {
   const handlePickPlaylist = async (plId: string) => {
     setPlaylistPickerVisible(false);
     if (!selectedTrackId) return;
-    const targetPl = playlists.find(p => p.id === plId);
-    if (!targetPl) return;
-
-    if (targetPl.tracks.some(t => String(t.trackId) === selectedTrackId)) {
-      showToast('Already in playlist', 'warning');
-      return;
-    }
-
-    const item = { trackId: selectedTrackId };
-    const pl = playlists.map(p => {
-      if (p.id === plId) {
-        return {
-          ...p,
-          tracks: [
-            ...p.tracks,
-            {
-              trackId: selectedTrackId,
-              trackName: 'Track',
-              artistName: '',
-              artistId: '',
-              collectionName: '',
-              collectionId: '',
-              artworkUrl: '',
-              addedAt: Date.now(),
-            },
-          ],
-        };
-      }
-      return p;
-    });
-    // save playlist
-    createPlaylist(targetPl.name);
-    showToast(`Added to "${targetPl.name}"`, 'success');
+    await addToPlaylist(plId, { trackId: selectedTrackId });
   };
 
   const handleCreateNewPlaylist = async () => {

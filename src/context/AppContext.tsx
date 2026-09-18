@@ -49,6 +49,7 @@ interface AppContextType {
   toggleFollow: (artistId: string | number, artwork?: string) => Promise<void>;
   playlists: Playlist[];
   createPlaylist: (name: string) => Promise<Playlist | null>;
+  addToPlaylist: (plId: string, track: MusicItem | LikeEntry | { trackId: string }) => Promise<void>;
   removeFromPlaylist: (plId: string, trackId: string | number) => Promise<void>;
   renamePlaylist: (plId: string, name: string) => Promise<void>;
   deletePlaylist: (plId: string) => Promise<void>;
@@ -293,6 +294,54 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     return pl;
   };
 
+  const addToPlaylist = async (plId: string, trackObj: MusicItem | LikeEntry | { trackId: string }) => {
+    const id = String(trackObj.trackId);
+    const targetPl = playlists.find(p => p.id === plId);
+    if (!targetPl) return;
+
+    if (targetPl.tracks.some(t => String(t.trackId) === id)) {
+      showToast('Already in playlist', 'warning');
+      return;
+    }
+
+    let trackEntry: LikeEntry;
+    if ('trackName' in trackObj && trackObj.trackName && trackObj.trackName !== 'Track') {
+      trackEntry = {
+        trackId: id,
+        trackName: trackObj.trackName,
+        artistName: trackObj.artistName || '',
+        artistId: trackObj.artistId ? String(trackObj.artistId) : '',
+        collectionName: trackObj.collectionName || '',
+        collectionId: trackObj.collectionId ? String(trackObj.collectionId) : '',
+        artworkUrl: ('artworkUrl100' in trackObj ? trackObj.artworkUrl100 : trackObj.artworkUrl) || '',
+        addedAt: Date.now(),
+      };
+    } else {
+      const cached = getCachedItem('track', id);
+      trackEntry = {
+        trackId: id,
+        trackName: cached?.trackName || 'Track',
+        artistName: cached?.artistName || '',
+        artistId: cached?.artistId ? String(cached.artistId) : '',
+        collectionName: cached?.collectionName || '',
+        collectionId: cached?.collectionId ? String(cached.collectionId) : '',
+        artworkUrl: cached?.artworkUrl100 || cached?.artworkUrl || '',
+        addedAt: Date.now(),
+      };
+    }
+
+    const next = playlists.map(p => {
+      if (p.id === plId) {
+        return { ...p, tracks: [...p.tracks, trackEntry] };
+      }
+      return p;
+    });
+
+    setPlaylistsState(next);
+    await savePlaylists(next);
+    showToast(`Added to "${targetPl.name}"`, 'success');
+  };
+
   const removeFromPlaylist = async (plId: string, trackId: string | number) => {
     const id = String(trackId);
     const next = playlists.map(p => {
@@ -398,6 +447,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         toggleFollow,
         playlists,
         createPlaylist,
+        addToPlaylist,
         removeFromPlaylist,
         renamePlaylist,
         deletePlaylist,
