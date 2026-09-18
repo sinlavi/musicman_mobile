@@ -4,6 +4,7 @@ import 'package:http/http.dart' as http;
 import 'package:path_provider/path_provider.dart';
 import '../models/music_item.dart';
 import 'api_service.dart';
+import 'storage_service.dart';
 
 enum DownloadStatus { queued, crawling, saving, ready, completed, failed, paused }
 
@@ -101,6 +102,26 @@ class DownloadManager {
     if (!await _audioDir!.exists()) {
       await _audioDir!.create(recursive: true);
     }
+    _loadFromStorage();
+  }
+
+  void _loadFromStorage() {
+    final rawList = StorageService.getDownloads();
+    _items.clear();
+    for (final jsonMap in rawList) {
+      final item = DownloadItem.fromJson(jsonMap);
+      if (item.status == DownloadStatus.saving) {
+        item.status = DownloadStatus.paused;
+        item.percent = 0;
+        item.error = 'Interrupted';
+      }
+      _items.add(item);
+    }
+    _notify();
+  }
+
+  void _persist() {
+    StorageService.saveDownloads(_items.map((e) => e.toJson()).toList());
   }
 
   Future<File> _getLocalFile(String trackId) async {
@@ -123,6 +144,7 @@ class DownloadManager {
   }
 
   void _notify() {
+    _persist();
     _streamController.add(List.unmodifiable(_items));
   }
 
@@ -134,10 +156,6 @@ class DownloadManager {
   Future<void> addDownload(MusicItem item, {String quality = '320'}) async {
     final id = item.id;
     if (id.isEmpty) return;
-
-    if (await isOfflineCached(id)) {
-      return;
-    }
 
     final existingIdx = _items.indexWhere((e) => e.trackId == id);
     final newItem = DownloadItem(
@@ -210,11 +228,6 @@ class DownloadManager {
         dlItem.status = DownloadStatus.completed;
         dlItem.percent = 100.0;
         _notify();
-
-        Future.delayed(const Duration(seconds: 4), () {
-          _items.removeWhere((e) => e.trackId == item.id && e.status == DownloadStatus.completed);
-          _notify();
-        });
       } else {
         dlItem.status = DownloadStatus.failed;
         dlItem.error = 'HTTP ${response.statusCode}';
@@ -240,7 +253,6 @@ class DownloadManager {
       for (final item in inProgress) {
         final status = await ApiService.getCrawlStatus(item.trackId);
         if (status.downloadStatus == 'completed' || !status.found) {
-          // Look up fresh track data to see if audio link was generated
           final fresh = await ApiService.lookup(item.trackId, 'song');
           final freshTrack = fresh.firstWhere((element) => element.type == 'track', orElse: () => MusicItem());
           if (freshTrack.hasAudio) {

@@ -54,8 +54,8 @@ class MiniPlayer extends StatelessWidget {
                         children: [
                           ArtworkImage(
                             url: track.getArtwork(preferPx: 100),
-                            size: 42,
-                            borderRadius: 8,
+                            size: 44,
+                            borderRadius: 10,
                           ),
                           const SizedBox(width: 12),
                           Expanded(
@@ -187,21 +187,21 @@ class _FullPlayerSheetState extends State<FullPlayerSheet> with SingleTickerProv
               height: 36,
               decoration: BoxDecoration(
                 color: Colors.white10,
-                borderRadius: BorderRadius.circular(18),
+                borderRadius: BorderRadius.circular(10),
               ),
               child: TabBar(
                 controller: _tabController,
                 indicator: BoxDecoration(
                   color: AppTheme.primaryGradientStart,
-                  borderRadius: BorderRadius.circular(18),
+                  borderRadius: BorderRadius.circular(10),
                 ),
                 indicatorSize: TabBarIndicatorSize.tab,
                 labelColor: Colors.white,
                 unselectedLabelColor: AppTheme.textSecondary,
-                tabs: const [
-                  Tab(text: 'Playing'),
-                  Tab(text: 'Queue'),
-                  Tab(text: 'Lyrics'),
+                tabs: [
+                  const Tab(text: 'Playing'),
+                  Tab(text: 'Queue (${_audioService.queue.length})'),
+                  const Tab(text: 'Lyrics'),
                 ],
               ),
             ),
@@ -406,37 +406,64 @@ class _FullPlayerSheetState extends State<FullPlayerSheet> with SingleTickerProv
   Widget _buildQueueTab() {
     final queue = _audioService.queue;
 
-    return ReorderableListView.builder(
-      padding: const EdgeInsets.symmetric(vertical: 8),
-      itemCount: queue.length,
-      onReorder: (oldIndex, newIndex) {
-        _audioService.reorderQueue(oldIndex, newIndex);
-      },
-      itemBuilder: (context, index) {
-        final item = queue[index];
-        final isCurrent = index == _audioService.currentIndex;
-
-        return ListTile(
-          key: ValueKey('${item.id}_$index'),
-          selected: isCurrent,
-          selectedTileColor: AppTheme.primaryGradientStart.withOpacity(0.12),
-          leading: ArtworkImage(url: item.getArtwork(preferPx: 100), size: 40),
-          title: Text(item.name, maxLines: 1, overflow: TextOverflow.ellipsis),
-          subtitle: Text(item.artistName ?? '', maxLines: 1, overflow: TextOverflow.ellipsis),
-          trailing: Row(
-            mainAxisSize: MainAxisSize.min,
+    return Column(
+      children: [
+        Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
-              if (isCurrent)
-                const Icon(Icons.graphic_eq, color: AppTheme.primaryGradientStart),
-              IconButton(
-                icon: const Icon(Icons.close, size: 20),
-                onPressed: () => _audioService.removeFromQueue(index),
+              Text('Now playing · ${queue.length}', style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 12, color: AppTheme.textSecondary)),
+              Row(
+                children: [
+                  IconButton(
+                    icon: const Icon(Icons.shuffle, size: 20),
+                    onPressed: () => _audioService.toggleShuffle(),
+                  ),
+                  IconButton(
+                    icon: const Icon(Icons.delete_outline, size: 20),
+                    onPressed: () => _audioService.clearQueue(),
+                  ),
+                ],
               ),
             ],
           ),
-          onTap: () => _audioService.playItem(item),
-        );
-      },
+        ),
+        Expanded(
+          child: ReorderableListView.builder(
+            padding: const EdgeInsets.symmetric(vertical: 4),
+            itemCount: queue.length,
+            onReorder: (oldIndex, newIndex) {
+              _audioService.reorderQueue(oldIndex, newIndex);
+            },
+            itemBuilder: (context, index) {
+              final item = queue[index];
+              final isCurrent = index == _audioService.currentIndex;
+
+              return ListTile(
+                key: ValueKey('${item.id}_$index'),
+                selected: isCurrent,
+                selectedTileColor: AppTheme.primaryGradientStart.withValues(alpha: 0.12),
+                leading: ArtworkImage(url: item.getArtwork(preferPx: 100), size: 40),
+                title: Text(item.name, maxLines: 1, overflow: TextOverflow.ellipsis, style: TextStyle(color: isCurrent ? AppTheme.primaryGradientStart : Colors.white, fontWeight: isCurrent ? FontWeight.bold : FontWeight.normal)),
+                subtitle: Text(item.artistName ?? '', maxLines: 1, overflow: TextOverflow.ellipsis),
+                trailing: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    if (isCurrent)
+                      const Icon(Icons.graphic_eq, color: AppTheme.primaryGradientStart),
+                    IconButton(
+                      icon: const Icon(Icons.close, size: 20),
+                      onPressed: () => _audioService.removeFromQueue(index),
+                    ),
+                  ],
+                ),
+                onTap: () => _audioService.playItem(item),
+              );
+            },
+          ),
+        ),
+      ],
     );
   }
 
@@ -476,8 +503,19 @@ class _FullPlayerSheetState extends State<FullPlayerSheet> with SingleTickerProv
               }
             }
 
-            return Padding(
-              padding: const EdgeInsets.symmetric(vertical: 8),
+            return Container(
+              margin: const EdgeInsets.symmetric(vertical: 4),
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+              decoration: BoxDecoration(
+                border: Border(
+                  left: BorderSide(
+                    color: isActive ? AppTheme.primaryGradientStart : Colors.transparent,
+                    width: 3,
+                  ),
+                ),
+                color: isActive ? AppTheme.primaryGradientStart.withValues(alpha: 0.12) : Colors.transparent,
+                borderRadius: BorderRadius.circular(8),
+              ),
               child: GestureDetector(
                 onTap: () {
                   if (line.time != null) {
@@ -486,11 +524,10 @@ class _FullPlayerSheetState extends State<FullPlayerSheet> with SingleTickerProv
                 },
                 child: Text(
                   line.text.isEmpty ? '♪' : line.text,
-                  textAlign: TextAlign.center,
                   style: TextStyle(
-                    fontSize: isActive ? 18 : 15,
+                    fontSize: isActive ? 17 : 14,
                     fontWeight: isActive ? FontWeight.bold : FontWeight.normal,
-                    color: isActive ? AppTheme.primaryGradientStart : Colors.white60,
+                    color: isActive ? Colors.white : Colors.white60,
                   ),
                 ),
               ),
@@ -518,7 +555,9 @@ class _FullPlayerSheetState extends State<FullPlayerSheet> with SingleTickerProv
                 title: const Text('Share Track'),
                 onTap: () {
                   Navigator.pop(context);
-                  Share.share('Check out ${track.name} by ${track.artistName ?? "MusicMan"}!');
+                  SharePlus.instance.share(
+                    ShareParams(text: 'Check out ${track.name} by ${track.artistName ?? "MusicMan"}!'),
+                  );
                 },
               ),
               ListTile(

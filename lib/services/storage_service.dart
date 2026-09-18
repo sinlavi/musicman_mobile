@@ -107,6 +107,7 @@ class StorageService {
   static const String keyLikes = 'mm_likes';
   static const String keyPlaylists = 'mm_playlists';
   static const String keyRecent = 'mm_recent';
+  static const String keyDownloads = 'mm_downloads';
   static const String keyPlayed = 'mm_recently_played';
   static const String keyFollowing = 'mm_followed';
   static const String keySettings = 'mm_settings';
@@ -229,6 +230,22 @@ class StorageService {
 
   static Future<void> clearRecentSearches() async {
     await _prefs?.remove(keyRecent);
+  }
+
+  // --- Downloads State ---
+  static List<Map<String, dynamic>> getDownloads() {
+    final raw = _prefs?.getString(keyDownloads);
+    if (raw == null) return [];
+    try {
+      final list = json.decode(raw) as List;
+      return list.map((e) => e as Map<String, dynamic>).toList();
+    } catch (_) {
+      return [];
+    }
+  }
+
+  static Future<void> saveDownloads(List<Map<String, dynamic>> items) async {
+    await _prefs?.setString(keyDownloads, json.encode(items));
   }
 
   // --- Recently Played ---

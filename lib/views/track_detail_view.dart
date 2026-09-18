@@ -73,7 +73,9 @@ class _TrackDetailViewState extends State<TrackDetailView> {
           IconButton(
             icon: const Icon(Icons.share),
             onPressed: () {
-              Share.share('Check out ${track.name} by ${track.artistName ?? "MusicMan"}!');
+              SharePlus.instance.share(
+                ShareParams(text: 'Check out ${track.name} by ${track.artistName ?? "MusicMan"}!'),
+              );
             },
           ),
         ],
@@ -169,6 +171,10 @@ class _TrackDetailViewState extends State<TrackDetailView> {
           ),
           const SizedBox(height: 24),
 
+          // Crawl Card Section
+          _buildCrawlCard(track),
+          const SizedBox(height: 16),
+
           // Lyrics Section
           Card(
             color: AppTheme.surface,
@@ -181,11 +187,22 @@ class _TrackDetailViewState extends State<TrackDetailView> {
                   Row(
                     mainAxisAlignment: MainAxisAlignment.spaceBetween,
                     children: [
-                      const Row(
+                      Row(
                         children: [
-                          Icon(Icons.music_note, color: AppTheme.primaryGradientStart),
-                          SizedBox(width: 8),
-                          Text('Lyrics', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
+                          const Icon(Icons.music_note, color: AppTheme.primaryGradientStart),
+                          const SizedBox(width: 8),
+                          const Text('Lyrics', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
+                          if (_parsedLyrics != null && _parsedLyrics!.isSynced) ...[
+                            const SizedBox(width: 8),
+                            Container(
+                              padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                              decoration: BoxDecoration(
+                                color: AppTheme.primaryGradientStart.withValues(alpha: 0.16),
+                                borderRadius: BorderRadius.circular(4),
+                              ),
+                              child: const Text('SYNCED', style: TextStyle(fontSize: 9, color: AppTheme.primaryGradientStart, fontWeight: FontWeight.bold)),
+                            ),
+                          ],
                         ],
                       ),
                       if (_parsedLyrics != null && _parsedLyrics!.lines.isNotEmpty)
@@ -225,6 +242,112 @@ class _TrackDetailViewState extends State<TrackDetailView> {
           ),
         ],
       ),
+    );
+  }
+
+  Widget _buildCrawlCard(MusicItem track) {
+    return FutureBuilder<bool>(
+      future: _downloadManager.isOfflineCached(track.id),
+      builder: (context, snapshot) {
+        final isCached = snapshot.data ?? false;
+        final dlItem = _downloadManager.getItem(track.id);
+
+        if (isCached) {
+          return Container(
+            padding: const EdgeInsets.all(12),
+            decoration: BoxDecoration(
+              color: Colors.green.withValues(alpha: 0.13),
+              borderRadius: BorderRadius.circular(14),
+            ),
+            child: Row(
+              children: [
+                const Icon(Icons.cloud_done, color: Colors.green, size: 28),
+                const SizedBox(width: 12),
+                const Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text('Saved offline', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 14)),
+                      Text('Ready to play without internet', style: TextStyle(fontSize: 11, color: AppTheme.textSecondary)),
+                    ],
+                  ),
+                ),
+                IconButton(
+                  icon: const Icon(Icons.delete_outline, color: Colors.red),
+                  onPressed: () async {
+                    await _downloadManager.removeDownload(track.id);
+                    setState(() {});
+                  },
+                ),
+              ],
+            ),
+          );
+        }
+
+        if (dlItem != null && (dlItem.status == DownloadStatus.queued || dlItem.status == DownloadStatus.crawling || dlItem.status == DownloadStatus.saving)) {
+          return Container(
+            padding: const EdgeInsets.all(12),
+            decoration: BoxDecoration(
+              color: Colors.cyan.withValues(alpha: 0.12),
+              borderRadius: BorderRadius.circular(14),
+            ),
+            child: Column(
+              children: [
+                Row(
+                  children: [
+                    const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.cyan)),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: Text(
+                        dlItem.status == DownloadStatus.saving ? 'Downloading...' : 'Crawling...',
+                        style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 14, color: Colors.cyan),
+                      ),
+                    ),
+                    Text('${dlItem.percent.toStringAsFixed(0)}%', style: const TextStyle(fontWeight: FontWeight.bold, color: Colors.cyan)),
+                  ],
+                ),
+                const SizedBox(height: 8),
+                LinearProgressIndicator(value: dlItem.percent / 100.0, color: Colors.cyan, backgroundColor: Colors.white10),
+              ],
+            ),
+          );
+        }
+
+        return Container(
+          padding: const EdgeInsets.all(12),
+          decoration: BoxDecoration(
+            color: AppTheme.primaryGradientStart.withValues(alpha: 0.11),
+            borderRadius: BorderRadius.circular(14),
+          ),
+          child: Row(
+            children: [
+              const Icon(Icons.cloud_download, color: AppTheme.primaryGradientStart, size: 28),
+              const SizedBox(width: 12),
+              const Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text('Not downloaded', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 14)),
+                    Text('Crawl to listen offline', style: TextStyle(fontSize: 11, color: AppTheme.textSecondary)),
+                  ],
+                ),
+              ),
+              ElevatedButton(
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: AppTheme.primaryGradientStart,
+                  foregroundColor: Colors.white,
+                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+                ),
+                onPressed: () async {
+                  await _downloadManager.addDownload(track);
+                  setState(() {});
+                },
+                child: const Text('Crawl'),
+              ),
+            ],
+          ),
+        );
+      },
     );
   }
 }

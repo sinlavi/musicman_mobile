@@ -23,7 +23,7 @@ class ParsedLyrics {
 
 class LyricsParser {
   static final RegExp _instrumentalRe = RegExp(
-    r'^(instrumental|no\s*lyrics?|no\s*lyrics?\s*available|lyrics?\s*not\s*available|lyrics?\s*not\s*found|not\s*found|instrumental\s*\/\s*not\s*found|only\s*music|music\s*only|\[?\s*instrumental\s*\]?|\(\s*instrumental\s*\)|♪+\s*instrumental\s*♪*|♫+\s*instrumental\s*♫*|\.{3,}|-+|—+)$',
+    r'^(instrumental|no\s*lyrics?|no\s*lyrics?\s*available|lyrics?\s*not\s*available|lyrics?\s*not\s*found|not\s*found|instrumental\s*\/\s*not\s*found|instrumental\s*\/\s*(no\s*)?lyrics?|only\s*music|music\s*only|\[?\s*instrumental\s*\]?|\(\s*instrumental\s*\)|♪+\s*instrumental\s*♪*|♫+\s*instrumental\s*♫*|\.{3,}|-+|—+)$',
     caseSensitive: false,
   );
 
@@ -56,8 +56,8 @@ class LyricsParser {
           lines = node.map((l) {
             if (l is String) return LyricLine(time: null, text: l);
             if (l is Map) {
-              final t = _parseTime(l['time'] ?? l['startTime'] ?? l['start'] ?? l['t']);
-              final txt = _parseText(l['text'] ?? l['line'] ?? l['lyric'] ?? l['l']);
+              final t = _parseTime(l['time'] ?? l['startTime'] ?? l['start'] ?? l['t'] ?? l['timestamp'] ?? l['at'] ?? l['offset']);
+              final txt = _parseText(l['text'] ?? l['line'] ?? l['lyric'] ?? l['l'] ?? l['content'] ?? l['value']);
               return LyricLine(time: t, text: txt);
             }
             return LyricLine(time: null, text: '');
@@ -66,6 +66,10 @@ class LyricsParser {
         return;
       }
       if (node is Map) {
+        if (node['text'] != null && node['text'] is Map) {
+          ingest(node['text'], depth + 1);
+          if (lines.isNotEmpty || rawText.isNotEmpty) return;
+        }
         if (node['synced'] is String && (node['synced'] as String).trim().isNotEmpty) {
           if (rawText.isEmpty) rawText = node['synced'];
           return;
@@ -74,8 +78,8 @@ class LyricsParser {
           if (lines.isEmpty) {
             lines = (node['synced'] as List).map((l) {
               if (l is Map) {
-                final t = _parseTime(l['time'] ?? l['startTime'] ?? l['start'] ?? l['t']);
-                final txt = _parseText(l['text'] ?? l['line'] ?? l['lyric'] ?? l['l']);
+                final t = _parseTime(l['time'] ?? l['startTime'] ?? l['start'] ?? l['t'] ?? l['timestamp'] ?? l['at'] ?? l['offset']);
+                final txt = _parseText(l['text'] ?? l['line'] ?? l['lyric'] ?? l['l'] ?? l['content'] ?? l['value']);
                 return LyricLine(time: t, text: txt);
               }
               return LyricLine(time: null, text: l.toString());
@@ -87,8 +91,8 @@ class LyricsParser {
           if (lines.isEmpty) {
             lines = (node['lines'] as List).map((l) {
               if (l is Map) {
-                final t = _parseTime(l['time'] ?? l['startTime'] ?? l['start'] ?? l['t']);
-                final txt = _parseText(l['text'] ?? l['line'] ?? l['lyric'] ?? l['l']);
+                final t = _parseTime(l['time'] ?? l['startTime'] ?? l['start'] ?? l['t'] ?? l['timestamp'] ?? l['at'] ?? l['offset']);
+                final txt = _parseText(l['text'] ?? l['line'] ?? l['lyric'] ?? l['l'] ?? l['content'] ?? l['value']);
                 return LyricLine(time: t, text: txt);
               }
               return LyricLine(time: null, text: l.toString());
@@ -104,10 +108,25 @@ class LyricsParser {
           if (rawText.isEmpty) rawText = node['lyrics'];
           return;
         }
+        if (node['unsynced'] is String) {
+          if (rawText.isEmpty) rawText = node['unsynced'];
+          return;
+        }
+        if (node['unsynced'] is List && (node['unsynced'] as List).isNotEmpty) {
+          if (lines.isEmpty) {
+            lines = (node['unsynced'] as List).map((t) => LyricLine(time: null, text: t.toString())).toList();
+          }
+          return;
+        }
       }
     }
 
-    ingest(rawLyrics, 0);
+    dynamic payload = rawLyrics;
+    if (rawLyrics is Map && (rawLyrics['lyrics'] != null || rawLyrics['result'] != null || rawLyrics['data'] != null)) {
+      payload = rawLyrics['lyrics'] ?? rawLyrics['result'] ?? rawLyrics['data'];
+    }
+
+    ingest(payload, 0);
 
     if (lines.isEmpty && rawText.isNotEmpty) {
       final timeRe = RegExp(r'\[(\d{1,2}):(\d{1,2})(?:[.:](\d{1,3}))?\]');
@@ -133,7 +152,7 @@ class LyricsParser {
       lines = parsed;
     }
 
-    // Check if instrumental
+    // Check instrumental
     final joined = lines
         .map((e) => e.text.replaceAll(RegExp(r'\[.*?\]|\(.*?\)', dotAll: true), '').trim())
         .where((e) => e.isNotEmpty)
