@@ -7,6 +7,32 @@ on:
   pull_request:
     branches: [ "main", "master" ]
   workflow_dispatch:
+    inputs:
+      build_universal:
+        description: 'Build universal APK'
+        required: false
+        default: true
+        type: boolean
+      build_split_abi:
+        description: 'Build split-per-ABI APKs'
+        required: false
+        default: true
+        type: boolean
+      run_tests:
+        description: 'Run Flutter tests before building'
+        required: false
+        default: true
+        type: boolean
+      create_release:
+        description: 'Create a GitHub Release (requires a tag input below)'
+        required: false
+        default: false
+        type: boolean
+      release_tag:
+        description: 'Tag name for the release (e.g. v1.0.0). Only used if create_release is true.'
+        required: false
+        default: ''
+        type: string
 
 jobs:
   build:
@@ -33,18 +59,25 @@ jobs:
         run: flutter pub get
 
       - name: Run Tests
+        # Runs on push/PR always; on manual dispatch only if run_tests is true
+        if: github.event_name != 'workflow_dispatch' || inputs.run_tests
         run: flutter test
 
       - name: Build Universal Release APK
+        # On push/PR always; on manual dispatch only if build_universal is true
+        if: github.event_name != 'workflow_dispatch' || inputs.build_universal
         run: flutter build apk --release
 
       - name: Build ABI Split Release APKs
+        if: github.event_name != 'workflow_dispatch' || inputs.build_split_abi
         run: flutter build apk --release --split-per-abi
 
       - name: Organize Release Artifacts
         run: |
           mkdir -p release_apks
-          cp build/app/outputs/flutter-apk/app-release.apk release_apks/MusicMan-universal-release.apk
+          if [ -f build/app/outputs/flutter-apk/app-release.apk ]; then
+            cp build/app/outputs/flutter-apk/app-release.apk release_apks/MusicMan-universal-release.apk
+          fi
           if [ -f build/app/outputs/flutter-apk/app-arm64-v8a-release.apk ]; then
             cp build/app/outputs/flutter-apk/app-arm64-v8a-release.apk release_apks/MusicMan-arm64-v8a-release.apk
           fi
@@ -54,6 +87,8 @@ jobs:
           if [ -f build/app/outputs/flutter-apk/app-x86_64-release.apk ]; then
             cp build/app/outputs/flutter-apk/app-x86_64-release.apk release_apks/MusicMan-x86_64-release.apk
           fi
+          echo "Artifacts gathered:"
+          ls -la release_apks/
 
       - name: Upload APK Artifacts
         uses: actions/upload-artifact@v4
@@ -62,10 +97,20 @@ jobs:
           path: release_apks/*.apk
           if-no-files-found: error
 
-      - name: Release APKs on Tag / GitHub Release
+      - name: Release APKs on Tag Push
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
+          files: release_apks/*.apk
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Release APKs on Manual Dispatch
+        if: github.event_name == 'workflow_dispatch' && inputs.create_release && inputs.release_tag != ''
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.release_tag }}
+          name: ${{ inputs.release_tag }}
           files: release_apks/*.apk
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
