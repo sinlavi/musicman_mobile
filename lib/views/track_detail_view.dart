@@ -73,9 +73,7 @@ class _TrackDetailViewState extends State<TrackDetailView> {
           IconButton(
             icon: const Icon(Icons.share),
             onPressed: () {
-              SharePlus.instance.share(
-                ShareParams(text: 'Check out ${track.name} by ${track.artistName ?? "MusicMan"}!'),
-              );
+              Share.share('Check out ${track.name} by ${track.artistName ?? "MusicMan"}!');
             },
           ),
         ],

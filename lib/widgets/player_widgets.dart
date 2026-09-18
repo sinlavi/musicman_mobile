@@ -507,13 +507,7 @@ class _FullPlayerSheetState extends State<FullPlayerSheet> with SingleTickerProv
               margin: const EdgeInsets.symmetric(vertical: 4),
               padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
               decoration: BoxDecoration(
-                border: Border(
-                  left: BorderSide(
-                    color: isActive ? AppTheme.primaryGradientStart : Colors.transparent,
-                    width: 3,
-                  ),
-                ),
-                color: isActive ? AppTheme.primaryGradientStart.withValues(alpha: 0.12) : Colors.transparent,
+                color: isActive ? AppTheme.primaryGradientStart.withValues(alpha: 0.16) : Colors.transparent,
                 borderRadius: BorderRadius.circular(8),
               ),
               child: GestureDetector(
@@ -555,9 +549,7 @@ class _FullPlayerSheetState extends State<FullPlayerSheet> with SingleTickerProv
                 title: const Text('Share Track'),
                 onTap: () {
                   Navigator.pop(context);
-                  SharePlus.instance.share(
-                    ShareParams(text: 'Check out ${track.name} by ${track.artistName ?? "MusicMan"}!'),
-                  );
+                  Share.share('Check out ${track.name} by ${track.artistName ?? "MusicMan"}!');
                 },
               ),
               ListTile(
