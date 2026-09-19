@@ -8,6 +8,21 @@ const CFG = {
   apiToken: 'change_me_to_a_secure_token',
   siteName: 'MusicMan'
 };
+window.MM_HOOKS = {
+  playerChanged: [],
+  playbackChanged: [],
+  downloadAdded: [],
+  downloadUpdated: [],
+  downloadComplete: [],
+  trackPlayed: [],
+  routeChanged: [],
+  likeChanged: [],
+  fire(name, ...args){
+    for (const fn of (this[name] || [])){
+      try { fn(...args); } catch (e){ console.warn('[MM_HOOKS]', name, e); }
+    }
+  }
+};
 const SCOPE     = '/';
 const API_BASE  = CFG.apiBase.replace(/\/+$/, '');
 const API_TOKEN = CFG.apiToken;
