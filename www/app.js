@@ -647,6 +647,34 @@ const DL = {
     const url = getPlayable(track);
     if (!url){ this.saving.delete(id); throw new Error('No audio URL'); }
     try {
+      const DownloaderPlugin = window.Capacitor?.Plugins?.Downloader || window.CapacitorDownloader?.Downloader;
+      if (DownloaderPlugin && typeof DownloaderPlugin.download === 'function'){
+        const fileName = safeFileName([track.artistName, track.trackName].filter(Boolean).join(' - ') || id) + extFromType('', url);
+        let progressListener = null;
+        try {
+          if (typeof DownloaderPlugin.addListener === 'function'){
+            progressListener = await DownloaderPlugin.addListener('downloadProgress', (event) => {
+              if (event && event.percent != null){
+                const p = Math.max(0, Math.min(99, Math.round(Number(event.percent) || 0)));
+                this.update(id, { percent: p });
+              }
+            });
+          }
+        } catch (e){ console.warn('[Downloader listener]', e); }
+
+        try {
+          await DownloaderPlugin.download({
+            url: proxyUrl(url),
+            destination: fileName,
+            notification: 'progress'
+          });
+        } finally {
+          if (progressListener && typeof progressListener.remove === 'function'){
+            try { await progressListener.remove(); } catch {}
+          }
+        }
+      }
+
       const res = await fetch(proxyUrl(url));
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const total = Number(res.headers.get('content-length')) || 0;

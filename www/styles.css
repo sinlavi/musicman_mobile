@@ -65,8 +65,16 @@ html.low-end .fp-bg{ filter:none !important; opacity:.15 !important; inset:0 !im
   border-bottom: 1px solid var(--mm-divider);
   z-index:20; contain: layout style paint;
 }
-.app-bar .brand{ display:flex; align-items:center; gap:8px; font-weight:800; font-size:1.02rem; letter-spacing:-.02em; }
-.app-bar .brand i{ color: var(--bs-primary); font-size:1.35rem; }
+.app-bar .brand{ display:flex; align-items:center; gap:10px; font-weight:800; font-size:1.05rem; letter-spacing:-.02em; }
+.app-bar .brand .brand-icon{
+  width:32px; height:32px; border-radius:10px;
+  background: var(--bs-primary);
+  display:flex; align-items:center; justify-content:center;
+  box-shadow: 0 4px 12px rgba(var(--bs-primary-rgb),.35);
+  transition: transform .12s;
+}
+.app-bar .brand .brand-icon i{ color: #fff; font-size:1.25rem; }
+.app-bar .brand:active .brand-icon{ transform: scale(.92); }
 .app-bar .page-title{ font-size:.95rem; font-weight:700; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 
 /* ════════ MAIN ════════ */

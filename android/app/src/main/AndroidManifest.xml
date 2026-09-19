@@ -20,7 +20,8 @@
             android:launchMode="singleTask"
             android:exported="true"
             android:resizeableActivity="true"
-            android:supportsPictureInPicture="false">
+            android:supportsPictureInPicture="false"
+            android:windowSoftInputMode="adjustResize">
 
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
