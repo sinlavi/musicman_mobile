@@ -1759,11 +1759,15 @@ const itemId   = it => it?.trackId || it?.collectionId || it?.artistId || '';
 
 function getArtwork(it, size=300){
   const urls = it?.attachments?.artworkUrls;
-  if (!Array.isArray(urls) || !urls.length) return it?.artworkUrl || '';
-  const best = urls.find(u => String(u.size||'').includes(String(size))) || urls[urls.length-1];
-  const url = best?.url || '';
-  return url.replace(/\/(\d+)x(\d+)(bb)?\./, `/${size}x${size}bb.`);
+  if (Array.isArray(urls) && urls.length){
+    const best = urls.find(u => String(u.size||'').includes(String(size))) || urls[urls.length-1];
+    const url = best?.url || '';
+    if (url) return url.replace(/\/(\d+)x(\d+)(bb)?\./, `/${size}x${size}bb.`);
+  }
+  const art = it?.artworkUrl || it?.artworkUrl100 || it?.artworkUrl60 || '';
+  return art ? art.replace(/\/(\d+)x(\d+)(bb)?\./, `/${size}x${size}bb.`) : '';
 }
+window.getArtwork = getArtwork;
 function hasAudio(it){
   const a = it?.attachments?.audioUrls;
   return Array.isArray(a) && a.some(x => x && x.url);
@@ -1865,6 +1869,7 @@ async function idb(store, mode, fn){
 }
 const cachePut   = (id, blob, meta) => idb('audio','readwrite', s => s.put({ trackId:String(id), blob, meta, size: blob.size, at: Date.now() }));
 const cacheGet   = id => idb('audio','readonly', s => s.get(String(id))).then(r => r || null);
+const cacheKeys  = () => idb('audio','readonly', s => (s.getAllKeys ? s.getAllKeys() : s.getAll())).then(r => r || []);
 const cacheAll   = () => idb('audio','readonly', s => s.getAll()).then(r => r || []);
 const cacheDel   = id => idb('audio','readwrite', s => s.delete(String(id)));
 const cacheClear = () => idb('audio','readwrite', s => s.clear());
@@ -1872,7 +1877,11 @@ const cacheClear = () => idb('audio','readwrite', s => s.clear());
 const cachedIds = new Set();
 async function refreshCacheIndex(){
   cachedIds.clear();
-  (await cacheAll()).forEach(e => cachedIds.add(String(e.trackId)));
+  const keys = await cacheKeys();
+  keys.forEach(k => {
+    if (k && typeof k === 'object' && k.trackId) cachedIds.add(String(k.trackId));
+    else if (k != null) cachedIds.add(String(k));
+  });
 }
 const isCached = id => cachedIds.has(String(id));
 
@@ -2619,6 +2628,7 @@ let searchFilter = 'all';
 let searchCache = { term: null, items: null };
 
 function searchBarHtml(term=''){
+  const voiceSupported = typeof FEAT !== 'undefined' && FEAT.Voice?.supported?.();
   return `<div class="search-wrap">
     <form onsubmit="event.preventDefault();submitSearch()">
       <div class="search-box">
@@ -2627,6 +2637,7 @@ function searchBarHtml(term=''){
                value="${esc(term)}" autocomplete="off" enterkeyhint="search"
                role="combobox" aria-autocomplete="list" aria-expanded="false" aria-controls="searchSuggest">
         ${term ? `<button type="button" class="icon-btn sm" onclick="clearSearch()" aria-label="Clear"><i class="bi bi-x-circle-fill"></i></button>` : ''}
+        ${voiceSupported ? `<button type="button" class="icon-btn sm text-primary" onclick="FEAT.Voice.start()" aria-label="Voice search"><i class="bi bi-mic-fill"></i></button>` : ''}
       </div>
       <div class="search-suggest" id="searchSuggest" role="listbox" aria-label="Search suggestions"></div>
     </form>
@@ -3679,12 +3690,20 @@ function syncSaveButton(){
   const action = dlActionFor(Player.track);
   btn.innerHTML = `<i class="bi ${action.icon}"></i>`;
 }
+let _fullPlayerEl = null;
+function isFpVisible(){
+  _fullPlayerEl = _fullPlayerEl || $('#full');
+  return _fullPlayerEl?.classList.contains('show');
+}
+
 function setSeekUI(pct){
   const bar = $('#miniBar'); if (bar) bar.style.width = pct + '%';
-  const seek = $('#fpSeek');
-  if (seek && !Player.seeking){
-    seek.value = Math.round(pct*10);
-    seek.style.setProperty('--p', pct + '%');
+  if (isFpVisible()){
+    const seek = $('#fpSeek');
+    if (seek && !Player.seeking){
+      seek.value = Math.round(pct*10);
+      seek.style.setProperty('--p', pct + '%');
+    }
   }
 }
 
@@ -3710,7 +3729,9 @@ audio.addEventListener('timeupdate', () => {
       _lastProgressTick = now;
       const pct = (audio.currentTime / d) * 100;
       setSeekUI(pct);
-      const c = $('#fpCur'); if (c) c.textContent = fmtTime(audio.currentTime);
+      if (isFpVisible()){
+        const c = $('#fpCur'); if (c) c.textContent = fmtTime(audio.currentTime);
+      }
     }
     if (now - _lastLyricTick >= LYRIC_TICK_MS){
       _lastLyricTick = now;
@@ -3818,10 +3839,22 @@ async function playCachedById(id, fallbackMeta){
   audio.src = url;
   audio.playbackRate = Number(getSettings().playbackRate) || 1;
   audio.play().catch(() => {});
-  const fake = fallbackMeta && fallbackMeta.trackId ? fallbackMeta : {
+  const artworkUrl = m.artwork || getArtwork(fallbackMeta, 100);
+  const fake = fallbackMeta && fallbackMeta.trackId ? {
+    ...fallbackMeta,
+    trackName: fallbackMeta.trackName || m.name || 'Cached track',
+    artistName: fallbackMeta.artistName || m.artist || '',
+    artistId: fallbackMeta.artistId || m.artistId || '',
+    collectionName: fallbackMeta.collectionName || m.album || '',
+    collectionId: fallbackMeta.collectionId || m.collectionId || '',
+    attachments: {
+      artworkUrls: artworkUrl ? [{ url: artworkUrl }] : (fallbackMeta.attachments?.artworkUrls || []),
+      audioUrls: fallbackMeta.attachments?.audioUrls || [{ url:'local', quality:'320' }]
+    }
+  } : {
     wrapperType:'track', trackId:String(id),
     trackName: m.name || 'Cached track', artistName: m.artist || '',
-    artistId: m.artistId || '', collectionName: m.album || '',
+    artistId: m.artistId || '', collectionName: m.album || '', collectionId: m.collectionId || '',
     attachments: { artworkUrls: m.artwork ? [{ url: m.artwork }] : [] }
   };
   Player.track = fake;
@@ -4137,6 +4170,13 @@ async function ensureFpLyrics(){
   if (fpTab === 'lyrics') renderFpTabBody();
 }
 
+let _lyricsFontSize = 0.92; // rem
+function scaleLyricsFont(delta){
+  _lyricsFontSize = Math.min(1.5, Math.max(0.7, _lyricsFontSize + delta));
+  const body = document.querySelector('.fp-lyrics-body');
+  if (body) body.style.fontSize = _lyricsFontSize + 'rem';
+}
+
 function renderFpLyrics(body){
   const t = Player.track;
   if (!t){
@@ -4153,7 +4193,12 @@ function renderFpLyrics(body){
     body.innerHTML = `<div class="fp-lyrics-empty"><i class="bi bi-music-note-list"></i>No lyrics available for this track.</div>`;
     return;
   }
-  body.innerHTML = `<div class="fp-lyrics-body"></div>`;
+  body.innerHTML = `
+    <div class="d-flex justify-content-end gap-2 px-3 pt-2">
+      <button class="pill-btn sm" onclick="scaleLyricsFont(-0.1)" aria-label="Smaller text"><i class="bi bi-zoom-out"></i> A-</button>
+      <button class="pill-btn sm" onclick="scaleLyricsFont(0.1)" aria-label="Larger text"><i class="bi bi-zoom-in"></i> A+</button>
+    </div>
+    <div class="fp-lyrics-body" style="font-size:${_lyricsFontSize}rem"></div>`;
   renderLyricsInto(body.querySelector('.fp-lyrics-body'), syncedLyricsCache.lines, syncedLyricsCache.synced);
 }
 
@@ -4290,6 +4335,7 @@ async function openTrackMenu(trackId, playlistId){
   const action  = dlActionFor(it);
 
   const rows = [];
+  rows.push(`<button class="sheet-item" onclick="menuAction('play')"><i class="bi bi-play-circle text-primary"></i><span>Play track</span></button>`);
   if (dl && ['queued','crawling','saving'].includes(dl.status)){
     rows.push(`<button class="sheet-item" onclick="menuAction('openDl')"><i class="bi ${action.icon} text-info"></i><span>View ${action.isDirect ? 'download' : 'crawl'} progress</span></button>`);
     rows.push(`<button class="sheet-item danger" onclick="menuAction('cancelDl')"><i class="bi bi-x-circle"></i><span>Cancel ${action.isDirect ? 'download' : 'crawl'}</span></button>`);
