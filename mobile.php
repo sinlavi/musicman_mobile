@@ -320,11 +320,15 @@ body{
   margin:0; height:100dvh;
   display:flex; flex-direction:column; overflow:hidden;
   overscroll-behavior:none; -webkit-font-smoothing: antialiased;
-  user-select:none;
+  -webkit-user-select:none; user-select:none;
   font-family: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
   letter-spacing:-.005em;
 }
-input,textarea{ user-select:text; }
+input, textarea, [contenteditable="true"]{
+  -webkit-user-select: text !important;
+  user-select: text !important;
+  pointer-events: auto !important;
+}
 a{ text-decoration:none; color:inherit; }
 .min-w-0{ min-width:0; }
 button i.bi{ line-height: 1; display:inline-block; }
@@ -4893,15 +4897,14 @@ function dlRowHtml(it){
   const isActive = ['queued','crawling','saving'].includes(it.status);
   const isReady  = it.status === 'ready';
   const isFailed = ['failed','paused'].includes(it.status);
-  const statusLabel = {
-    queued:'Queued', crawling:'Crawling', saving:'Downloading',
-    ready:'Ready', failed:'Failed', paused:'Paused'
-  }[it.status] || it.status;
+  const pct = Math.max(0, Math.min(100, Math.round(Number(it.percent ?? it.progress ?? it.pct ?? 0))));
+  const statusLabel = (it.status === 'saving' || it.status === 'crawling')
+    ? `${it.status === 'saving' ? 'Downloading' : 'Crawling'} · ${pct}%`
+    : ({ queued:'Queued', ready:'Ready', failed:'Failed', paused:'Paused' }[it.status] || it.status);
   const statusClass = {
     queued:'queued', crawling:'crawling', saving:'saving',
     ready:'ready', failed:'error', paused:'error'
   }[it.status] || 'queued';
-  const pct = it.percent || 0;
   const progressClass = isFailed ? 'error' : it.status === 'saving' ? 'saving' : '';
   let rightAction = '';
   if (isActive){

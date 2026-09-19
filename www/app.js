@@ -3010,9 +3010,11 @@ function dlRowHtml(it){
   const isActive = ['queued','crawling','saving'].includes(it.status);
   const isReady  = it.status === 'ready';
   const isFailed = ['failed','paused'].includes(it.status);
-  const statusLabel = { queued:'Queued', crawling:'Crawling', saving:'Downloading', ready:'Ready', failed:'Failed', paused:'Paused' }[it.status] || it.status;
+  const pct = Math.max(0, Math.min(100, Math.round(Number(it.percent ?? it.progress ?? it.pct ?? 0))));
+  const statusLabel = (it.status === 'saving' || it.status === 'crawling')
+    ? `${it.status === 'saving' ? 'Downloading' : 'Crawling'} · ${pct}%`
+    : ({ queued:'Queued', ready:'Ready', failed:'Failed', paused:'Paused' }[it.status] || it.status);
   const statusClass = { queued:'queued', crawling:'crawling', saving:'saving', ready:'ready', failed:'error', paused:'error' }[it.status] || 'queued';
-  const pct = it.percent || 0;
   const progressClass = isFailed ? 'error' : it.status === 'saving' ? 'saving' : '';
   let rightAction = '';
   if (isActive) rightAction = `<button class="icon-btn sm text-danger" onclick="DL.remove('${esc(it.trackId)}')" aria-label="Cancel"><i class="bi bi-x-lg"></i></button>`;

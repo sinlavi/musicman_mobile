@@ -60,47 +60,67 @@ FEAT.Notif = (() => {
   const PLAYER_ID = 1;
   const DL_BASE = 1000;
 
+  let webNotifPerm = false;
+
   async function init(){
-    if (!isNative()){ ready = true; return; }
-    try {
-      await P().createChannel({ channel: CHANNELS[0] }).catch(() => {});
-      await P().createChannel({ channel: CHANNELS[1] }).catch(() => {});
-      await P().createChannel({ channel: CHANNELS[2] }).catch(() => {});
-      const res = await P().checkPermissions();
-      permitted = res.display === 'granted';
-      if (!permitted){
-        const ask = await P().requestPermissions();
-        permitted = ask.display === 'granted';
+    if (isNative()){
+      try {
+        await P().createChannel({ channel: CHANNELS[0] }).catch(() => {});
+        await P().createChannel({ channel: CHANNELS[1] }).catch(() => {});
+        await P().createChannel({ channel: CHANNELS[2] }).catch(() => {});
+        const res = await P().checkPermissions();
+        permitted = res.display === 'granted';
+        if (!permitted){
+          const ask = await P().requestPermissions();
+          permitted = ask.display === 'granted';
+        }
+        ls.set(FK.notifPerm, permitted);
+        ready = true;
+      } catch (e){ console.warn('[Notif] init:', e); ready = true; }
+    } else if ('Notification' in window){
+      if (Notification.permission === 'granted'){ webNotifPerm = true; }
+      else if (Notification.permission !== 'denied'){
+        Notification.requestPermission().then(p => { webNotifPerm = (p === 'granted'); });
       }
-      ls.set(FK.notifPerm, permitted);
       ready = true;
-    } catch (e){ console.warn('[Notif] init:', e); ready = true; }
+    } else { ready = true; }
   }
 
   async function upsert(id, opts){
-    if (!isNative() || !permitted) return;
-    try {
-      await P().cancel({ notifications: [{ id }] }).catch(() => {});
-      await P().schedule({ notifications: [{
-        id,
-        smallIcon:  'ic_stat_musicman',
-        iconColor:  '#0d6efd',
-        channelId:  'music_playback',
-        ongoing:    false,
-        autoCancel: true,
-        ...opts
-      }]});
-    } catch (e){ /* benign — notification may be dismissed */ }
+    if (isNative()){
+      if (!permitted) return;
+      try {
+        await P().cancel({ notifications: [{ id }] }).catch(() => {});
+        const safeOpts = { ...opts };
+        delete safeOpts.largeIcon; // Avoid unparseable remote HTTP asset URLs in Android native resource lookup
+        await P().schedule({ notifications: [{
+          id,
+          channelId:  'music_playback',
+          ongoing:    false,
+          autoCancel: true,
+          ...safeOpts
+        }]});
+      } catch (e){ /* benign */ }
+    } else if (webNotifPerm && ('Notification' in window)){
+      try {
+        new Notification(opts.title || 'MusicMan', {
+          body: opts.body || '',
+          icon: opts.largeIcon || '/icon.svg',
+          tag: 'mm_notif_' + id,
+          silent: true
+        });
+      } catch (e){}
+    }
   }
 
   async function cancel(id){
-    if (!isNative()) return;
-    try { await P().cancel({ notifications: [{ id }] }); } catch {}
+    if (isNative()){
+      try { await P().cancel({ notifications: [{ id }] }); } catch {}
+    }
   }
 
   /* ── Player now-playing notification ── */
   async function updatePlayer(){
-    if (!isNative() || !permitted) return;
     const t = Player.track;
     if (!t){ await cancel(PLAYER_ID); return; }
     const art = getArtwork(t, 512) || t.artworkUrl || '';

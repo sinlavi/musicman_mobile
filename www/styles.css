@@ -30,13 +30,17 @@ body{
   margin:0; height:100dvh;
   display:flex; flex-direction:column; overflow:hidden;
   overscroll-behavior:none; -webkit-font-smoothing: antialiased;
-  user-select:none;
+  -webkit-user-select:none; user-select:none;
   font-family: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
   letter-spacing:-.005em;
   background: var(--bs-body-bg);
   color: var(--bs-body-color);
 }
-input,textarea{ user-select:text; }
+input, textarea, [contenteditable="true"]{
+  -webkit-user-select: text !important;
+  user-select: text !important;
+  pointer-events: auto !important;
+}
 a{ text-decoration:none; color:inherit; }
 .min-w-0{ min-width:0; }
 button i.bi{ line-height: 1; display:inline-block; }
