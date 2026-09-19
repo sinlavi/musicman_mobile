@@ -1,0 +1,14 @@
+node_modules/
+android/build/
+android/app/build/
+android/.gradle/
+android/captures/
+android/.idea/
+android/*.iml
+android/app/*.iml
+android/local.properties
+.DS_Store
+verification.png
+verify.py
+serve.log
+/home/jules/verification/
