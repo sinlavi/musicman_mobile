@@ -1,6 +1,6 @@
 'use strict';
 /* ============================================================
-   MusicMan — Capacitor Edition
+   MusicMan — Capacitor Edition (with MM_HOOKS extension points)
    ============================================================ */
 
 const CFG = {
@@ -8,6 +8,8 @@ const CFG = {
   apiToken: 'change_me_to_a_secure_token',
   siteName: 'MusicMan'
 };
+
+/* ─── Event bus for extension modules (features.js) ─── */
 window.MM_HOOKS = {
   playerChanged: [],
   playbackChanged: [],
@@ -23,6 +25,7 @@ window.MM_HOOKS = {
     }
   }
 };
+
 const SCOPE     = '/';
 const API_BASE  = CFG.apiBase.replace(/\/+$/, '');
 const API_TOKEN = CFG.apiToken;
@@ -44,7 +47,12 @@ const KEY = {
 };
 const SETTINGS_DEFAULT = {
   theme:'dark', animations:true, playbackRate:1, autoScrollLyrics:true,
-  autoRetry:true, visualizer:true, accent:'blue', sleepFade:30
+  autoRetry:true, visualizer:true, accent:'blue', sleepFade:30,
+  // Keys added by features.js:
+  offlineOnly:false,
+  autoDownloadLikes:false,
+  gapless:true,
+  crossfadeSec:0
 };
 const POLL_MS = IS_LOW_END ? 3500 : 2500;
 const QUEUE_GRACE_MS = 3000;
@@ -191,7 +199,6 @@ function statsRecord(track){
   s.daily[day] = (s.daily[day] || 0) + 1;
   s.total = (s.total || 0) + 1;
 
-  // Trim old entries
   const trackArr = Object.values(s.tracks).sort((a,b)=>b.last - a.last).slice(0, 500);
   s.tracks = Object.fromEntries(trackArr.map(x => [x.id, x]));
   statsSave(s);
@@ -567,11 +574,13 @@ const DL = {
       bytes: 0, totalBytes: 0, addedAt: entry.addedAt || Date.now(), updatedAt: Date.now()
     });
     this.notify();
+    MM_HOOKS.fire('downloadUpdated', this.get(entry.trackId));
   },
   update(id, patch){
     const it = this.get(id); if (!it) return;
     Object.assign(it, patch, { updatedAt: Date.now() });
     this.notify();
+    MM_HOOKS.fire('downloadUpdated', it);
   },
   remove(id){
     this.items = this.items.filter(i => String(i.trackId) !== String(id));
@@ -658,6 +667,7 @@ const DL = {
       this.update(id, { status:'completed', percent:100, bytes: blob.size, totalBytes: blob.size, completedAt: Date.now() });
       haptic(18);
       toast(`Downloaded · ${fmtSize(blob.size)}`);
+      MM_HOOKS.fire('downloadComplete', { trackId: id, size: blob.size, meta: track });
       if (isLibraryDlRoute()) renderDownloads();
       if (isTrackRoute()){ const t = getCached('track', id); if (t) renderCrawlCard(t, null); }
       setTimeout(() => { if (this.get(id)?.status === 'completed') this.remove(id); }, 3500);
@@ -764,9 +774,12 @@ function toggleLike(item){
   const id = String(item.trackId);
   const likes = getLikes();
   const idx = likes.findIndex(t => String(t.trackId) === id);
+  const nowLiked = idx < 0;
   if (idx >= 0){ likes.splice(idx,1); toast('Removed from Liked'); }
   else { likes.unshift(makeLikeEntry(item)); toast('Added to Liked'); }
-  ls.set(KEY.likes, likes); haptic(8);
+  ls.set(KEY.likes, likes);
+  haptic(8);
+  MM_HOOKS.fire('likeChanged', id, nowLiked);
   refreshLikes();
   if (isLibraryLikesRoute()) viewLikes();
 }
@@ -939,10 +952,13 @@ function titleForRoute(parts){
   if (parts[0] === 'album') return 'Album';
   if (parts[0] === 'track') return 'Track';
   if (parts[0] === 'stats') return 'Statistics';
+  if (parts[0] === 'achievements') return 'Achievements';
+  if (parts[0] === 'bookmarks') return 'Bookmarks';
   return 'MusicMan';
 }
 
 async function route(){
+  MM_HOOKS.fire('routeChanged', currentPath());
   closeAllSheets();
   disconnectArtistTracksObserver();
   if (dlUnsubscribe){ dlUnsubscribe(); dlUnsubscribe = null; }
@@ -1735,7 +1751,7 @@ function copyText(text){
 }
 
 /* ══════════════════════════════════════════════════════════════
-   PLAYER  (with persistence, A–B repeat, MediaSession, visualizer)
+   PLAYER
    ══════════════════════════════════════════════════════════════ */
 const audio = new Audio();
 audio.preload = 'metadata';
@@ -1784,6 +1800,7 @@ function syncPlayerUI(){
   refreshLikes(); renderFpTabBody(); syncPlayIcons(); syncSaveButton();
   document.title = `${t.trackName || 'MusicMan'} · MusicMan`;
   updateMediaSession();
+  MM_HOOKS.fire('playerChanged', Player.track);
 }
 function syncPlayIcons(){
   const cls = Player.playing ? 'bi-pause-fill' : 'bi-play-fill';
@@ -1898,7 +1915,6 @@ function restorePlayerState(){
   Player.track = it;
   syncPlayerUI();
   ensureFpLyrics();
-  // Reflect paused state, don't autoplay
   setTimeout(() => {
     if (isCached(s.trackId)){
       cacheGet(s.trackId).then(e => {
@@ -1915,8 +1931,20 @@ function restorePlayerState(){
 }
 
 /* Audio events */
-audio.addEventListener('play',  () => { Player.playing = true;  syncPlayIcons(); syncSaveButton(); if (fpTab === 'queue') renderFpTabBody(); updateMediaSession(); });
-audio.addEventListener('pause', () => { Player.playing = false; syncPlayIcons(); if (fpTab === 'queue') renderFpTabBody(); updateMediaSession(); });
+audio.addEventListener('play',  () => {
+  Player.playing = true;
+  syncPlayIcons(); syncSaveButton();
+  if (fpTab === 'queue') renderFpTabBody();
+  updateMediaSession();
+  MM_HOOKS.fire('playbackChanged', true);
+});
+audio.addEventListener('pause', () => {
+  Player.playing = false;
+  syncPlayIcons();
+  if (fpTab === 'queue') renderFpTabBody();
+  updateMediaSession();
+  MM_HOOKS.fire('playbackChanged', false);
+});
 audio.addEventListener('ended', () => onTrackEnded());
 audio.addEventListener('loadedmetadata', () => {
   if (isFinite(audio.duration)){ const e = $('#fpDur'); if (e) e.textContent = fmtTime(audio.duration); }
@@ -1928,7 +1956,6 @@ let _lastLyricTick = 0;
 let _lastProgressTick = 0;
 let _lastPersist = 0;
 audio.addEventListener('timeupdate', () => {
-  // A–B repeat loop
   if (Player.abRepeat.a != null && Player.abRepeat.b != null && audio.currentTime >= Player.abRepeat.b){
     audio.currentTime = Player.abRepeat.a;
   }
@@ -1998,6 +2025,7 @@ async function playItem(item, source='MusicMan'){
   Player.track = resolvedItem;
   pushRecentlyPlayed(resolvedItem);
   statsRecord(resolvedItem);
+  MM_HOOKS.fire('trackPlayed', resolvedItem);
   setQueueFromItem(resolvedItem, id);
   persistQueue();
   syncPlayerUI();
@@ -2115,7 +2143,6 @@ function closeFullPlayer(){
 }
 window.addEventListener('popstate', () => { if ($('#full')?.classList.contains('show')) closeFullPlayer(); });
 
-/* Full-player drag to dismiss */
 (function initFullDrag(){
   const fp = $('#full'); if (!fp) return;
   let startY = 0, dy = 0, dragging = false;
@@ -2139,7 +2166,6 @@ window.addEventListener('popstate', () => { if ($('#full')?.classList.contains('
   });
 })();
 
-/* Visualizer bars (decorative) */
 function renderVisualizer(){
   const bars = 28;
   let out = '';
@@ -2151,7 +2177,6 @@ function renderVisualizer(){
   }
   return out;
 }
-// Keyframe injected once
 (function injectVisKeyframe(){
   const s = document.createElement('style');
   s.textContent = `@keyframes visBar{0%,100%{height:8%}50%{height:100%}}`;
@@ -2224,7 +2249,6 @@ function renderFpNow(body){
       </div>
     </div>`;
 
-  // Art swipe gestures
   const artWrap = $('#fpArtWrap');
   if (artWrap){
     let sx = 0, sy = 0, t0 = 0;
@@ -3132,7 +3156,6 @@ document.addEventListener('keydown', e => {
   if (e.key === 'Escape' && $('#full')?.classList.contains('show')) closeFullPlayer();
 });
 
-/* Save state before unload */
 window.addEventListener('beforeunload', () => { persistState(); persistQueue(); });
 document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden'){ persistState(); persistQueue(); } });
 
@@ -3160,11 +3183,9 @@ document.addEventListener('visibilitychange', () => { if (document.visibilitySta
 
   try { await refreshCacheIndex(); } catch (e){ console.warn('cache index failed:', e); }
 
-  // Restore previous session
   restoreQueueState();
   restorePlayerState();
 
-  // Redirect Capacitor's /index.html → /
   if (location.pathname.endsWith('.html')){
     try { history.replaceState(null, '', '/'); } catch {}
   }
