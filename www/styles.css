@@ -749,3 +749,24 @@ input[type=range].mm-range.vol::-moz-range-progress{ background: var(--bs-second
   .fp-art-wrap{ max-width:380px; }
   .hero-art{ width:260px; height:260px; }
 }
+/* Bookmark button sits nicely with the other action pills */
+.fp-bookmark{ transition: color .15s; }
+.fp-bookmark i.bi-bookmark-fill{ color: var(--bs-primary); }
+
+/* Hide the filter bar's filter icon on narrow screens if space is tight */
+@media (max-width: 400px){
+  #libFilterInput{ font-size: .82rem; }
+}
+
+/* Offline banner shown when offline-only mode is active */
+body.offline-only::after{
+  content: "Offline mode";
+  position: fixed; top: calc(var(--safe-top) + 46px); left: 50%;
+  transform: translateX(-50%);
+  background: rgba(var(--bs-warning-rgb),.9); color: #000;
+  padding: 3px 10px; border-radius: 999px;
+  font-size: .62rem; font-weight: 800;
+  letter-spacing: .08em; text-transform: uppercase;
+  z-index: 999;
+  pointer-events: none;
+}
