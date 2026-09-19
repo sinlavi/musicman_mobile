@@ -1,0 +1,6 @@
+{
+  "appId": "ir.rah3.musicman",
+  "appName": "MusicMan",
+  "webDir": "www",
+  "bundledWebRuntime": false
+}
