@@ -30,13 +30,17 @@ body{
   margin:0; height:100dvh;
   display:flex; flex-direction:column; overflow:hidden;
   overscroll-behavior:none; -webkit-font-smoothing: antialiased;
-  user-select:none;
+  -webkit-user-select:none; user-select:none;
   font-family: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
   letter-spacing:-.005em;
   background: var(--bs-body-bg);
   color: var(--bs-body-color);
 }
-input,textarea{ user-select:text; }
+input, textarea, [contenteditable="true"]{
+  -webkit-user-select: text !important;
+  user-select: text !important;
+  pointer-events: auto !important;
+}
 a{ text-decoration:none; color:inherit; }
 .min-w-0{ min-width:0; }
 button i.bi{ line-height: 1; display:inline-block; }
@@ -61,8 +65,16 @@ html.low-end .fp-bg{ filter:none !important; opacity:.15 !important; inset:0 !im
   border-bottom: 1px solid var(--mm-divider);
   z-index:20; contain: layout style paint;
 }
-.app-bar .brand{ display:flex; align-items:center; gap:8px; font-weight:800; font-size:1.02rem; letter-spacing:-.02em; }
-.app-bar .brand i{ color: var(--bs-primary); font-size:1.35rem; }
+.app-bar .brand{ display:flex; align-items:center; gap:10px; font-weight:800; font-size:1.05rem; letter-spacing:-.02em; }
+.app-bar .brand .brand-icon{
+  width:32px; height:32px; border-radius:10px;
+  background: var(--bs-primary);
+  display:flex; align-items:center; justify-content:center;
+  box-shadow: 0 4px 12px rgba(var(--bs-primary-rgb),.35);
+  transition: transform .12s;
+}
+.app-bar .brand .brand-icon i{ color: #fff; font-size:1.25rem; }
+.app-bar .brand:active .brand-icon{ transform: scale(.92); }
 .app-bar .page-title{ font-size:.95rem; font-weight:700; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 
 /* ════════ MAIN ════════ */

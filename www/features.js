@@ -60,47 +60,67 @@ FEAT.Notif = (() => {
   const PLAYER_ID = 1;
   const DL_BASE = 1000;
 
+  let webNotifPerm = false;
+
   async function init(){
-    if (!isNative()){ ready = true; return; }
-    try {
-      await P().createChannel({ channel: CHANNELS[0] }).catch(() => {});
-      await P().createChannel({ channel: CHANNELS[1] }).catch(() => {});
-      await P().createChannel({ channel: CHANNELS[2] }).catch(() => {});
-      const res = await P().checkPermissions();
-      permitted = res.display === 'granted';
-      if (!permitted){
-        const ask = await P().requestPermissions();
-        permitted = ask.display === 'granted';
+    if (isNative()){
+      try {
+        await P().createChannel({ channel: CHANNELS[0] }).catch(() => {});
+        await P().createChannel({ channel: CHANNELS[1] }).catch(() => {});
+        await P().createChannel({ channel: CHANNELS[2] }).catch(() => {});
+        const res = await P().checkPermissions();
+        permitted = res.display === 'granted';
+        if (!permitted){
+          const ask = await P().requestPermissions();
+          permitted = ask.display === 'granted';
+        }
+        ls.set(FK.notifPerm, permitted);
+        ready = true;
+      } catch (e){ console.warn('[Notif] init:', e); ready = true; }
+    } else if ('Notification' in window){
+      if (Notification.permission === 'granted'){ webNotifPerm = true; }
+      else if (Notification.permission !== 'denied'){
+        Notification.requestPermission().then(p => { webNotifPerm = (p === 'granted'); });
       }
-      ls.set(FK.notifPerm, permitted);
       ready = true;
-    } catch (e){ console.warn('[Notif] init:', e); ready = true; }
+    } else { ready = true; }
   }
 
   async function upsert(id, opts){
-    if (!isNative() || !permitted) return;
-    try {
-      await P().cancel({ notifications: [{ id }] }).catch(() => {});
-      await P().schedule({ notifications: [{
-        id,
-        smallIcon:  'ic_stat_musicman',
-        iconColor:  '#0d6efd',
-        channelId:  'music_playback',
-        ongoing:    false,
-        autoCancel: true,
-        ...opts
-      }]});
-    } catch (e){ /* benign — notification may be dismissed */ }
+    if (isNative()){
+      if (!permitted) return;
+      try {
+        await P().cancel({ notifications: [{ id }] }).catch(() => {});
+        const safeOpts = { ...opts };
+        delete safeOpts.largeIcon; // Avoid unparseable remote HTTP asset URLs in Android native resource lookup
+        await P().schedule({ notifications: [{
+          id,
+          channelId:  'music_playback',
+          ongoing:    false,
+          autoCancel: true,
+          ...safeOpts
+        }]});
+      } catch (e){ /* benign */ }
+    } else if (webNotifPerm && ('Notification' in window)){
+      try {
+        new Notification(opts.title || 'MusicMan', {
+          body: opts.body || '',
+          icon: opts.largeIcon || '/icon.svg',
+          tag: 'mm_notif_' + id,
+          silent: true
+        });
+      } catch (e){}
+    }
   }
 
   async function cancel(id){
-    if (!isNative()) return;
-    try { await P().cancel({ notifications: [{ id }] }); } catch {}
+    if (isNative()){
+      try { await P().cancel({ notifications: [{ id }] }); } catch {}
+    }
   }
 
   /* ── Player now-playing notification ── */
   async function updatePlayer(){
-    if (!isNative() || !permitted) return;
     const t = Player.track;
     if (!t){ await cancel(PLAYER_ID); return; }
     const art = getArtwork(t, 512) || t.artworkUrl || '';
@@ -211,12 +231,19 @@ FEAT.Resume = (() => {
     delete store[String(trackId)];
     ls.set(FK.positions, store);
   }
+  let pendingListener = null;
   async function applyIfAny(track){
+    if (pendingListener){
+      audio.removeEventListener('loadedmetadata', pendingListener);
+      pendingListener = null;
+    }
     if (!track?.trackId) return;
     const saved = get(track.trackId);
     if (!saved) return;
     // Wait until the audio element has metadata so seeking is valid
     const onReady = () => {
+      if (pendingListener === onReady) pendingListener = null;
+      audio.removeEventListener('loadedmetadata', onReady);
       try {
         const dur = audio.duration;
         const target = dur && saved.pos > dur - NEAR_END_SEC ? 0 : saved.pos;
@@ -225,10 +252,10 @@ FEAT.Resume = (() => {
           toast(`Resumed at ${fmtTime(target)}`);
         }
       } catch {}
-      audio.removeEventListener('loadedmetadata', onReady);
     };
+    pendingListener = onReady;
     if (audio.readyState >= 1) onReady();
-    else audio.addEventListener('loadedmetadata', onReady);
+    else audio.addEventListener('loadedmetadata', onReady, { once: true });
   }
   return { get, set, clear, applyIfAny, all };
 })();
@@ -575,6 +602,86 @@ FEAT.Voice = (() => {
 })();
 
 /* ══════════════════════════════════════════════════════════════
+   11b. WEB AUDIO 5-BAND EQUALIZER
+   ══════════════════════════════════════════════════════════════ */
+FEAT.Equalizer = (() => {
+  let ctx = null, sourceNode = null, filters = [];
+  const FREQS = [60, 230, 910, 3600, 14000];
+  const PRESETS = {
+    flat:        [0, 0, 0, 0, 0],
+    bass_boost:  [6, 4, 0, 0, 0],
+    vocal:       [-2, 1, 4, 3, 1],
+    pop:         [-1, 2, 4, 2, -1],
+    rock:        [5, 3, -1, 2, 4],
+    treble:      [-2, -1, 1, 4, 6]
+  };
+
+  function init(){
+    if (ctx) return;
+    try {
+      const AudioCtx = window.AudioContext || window.webkitAudioContext;
+      if (!AudioCtx) return;
+      ctx = new AudioCtx();
+      sourceNode = ctx.createMediaElementSource(audio);
+      filters = FREQS.map((freq, i) => {
+        const filter = ctx.createBiquadFilter();
+        filter.type = i === 0 ? 'lowshelf' : i === FREQS.length - 1 ? 'highshelf' : 'peaking';
+        filter.frequency.value = freq;
+        filter.gain.value = 0;
+        return filter;
+      });
+      sourceNode.connect(filters[0]);
+      for (let i = 0; i < filters.length - 1; i++){
+        filters[i].connect(filters[i+1]);
+      }
+      filters[filters.length - 1].connect(ctx.destination);
+      applySavedGains();
+    } catch (e){ console.warn('[Equalizer init]', e); }
+  }
+
+  function applySavedGains(){
+    const s = getSettings();
+    const gains = PRESETS[s.eqPreset] || s.eqGains || PRESETS.flat;
+    setGains(gains);
+  }
+
+  function setGains(gains){
+    if (!filters.length) return;
+    gains.forEach((g, i) => {
+      if (filters[i]) filters[i].gain.value = Number(g) || 0;
+    });
+  }
+
+  function setPreset(presetName){
+    const gains = PRESETS[presetName] || PRESETS.flat;
+    setSetting('eqPreset', presetName);
+    setSetting('eqGains', gains);
+    if (!ctx) init();
+    if (ctx && ctx.state === 'suspended') ctx.resume();
+    setGains(gains);
+  }
+
+  function setBandGain(bandIdx, gainValue){
+    if (!ctx) init();
+    if (ctx && ctx.state === 'suspended') ctx.resume();
+    const s = getSettings();
+    const gains = (s.eqGains || PRESETS.flat).slice();
+    gains[bandIdx] = Number(gainValue) || 0;
+    setSetting('eqPreset', 'custom');
+    setSetting('eqGains', gains);
+    if (filters[bandIdx]) filters[bandIdx].gain.value = gains[bandIdx];
+  }
+
+  // Ensure AudioContext resumes on first playback user interaction
+  audio.addEventListener('play', () => {
+    if (!ctx) init();
+    if (ctx && ctx.state === 'suspended') ctx.resume();
+  });
+
+  return { init, PRESETS, FREQS, setPreset, setBandGain, applySavedGains };
+})();
+
+/* ══════════════════════════════════════════════════════════════
    12. AMOLED THEME  (pure black)
    ══════════════════════════════════════════════════════════════ */
 FEAT.Amoled = (() => {
@@ -622,25 +729,23 @@ FEAT.Amoled = (() => {
    13. QR SHARE  (generate QR for a track URL)
    ══════════════════════════════════════════════════════════════ */
 FEAT.QR = (() => {
+  function generateSvg(text){
+    const size = 180;
+    // Standalone clean SVG matrix for URL sharing
+    const encoded = encodeURIComponent(text);
+    return `<svg xmlns="http://www.w3.org/2000/svg" width="${size}" height="${size}" viewBox="0 0 200 200">
+      <rect width="200" height="200" fill="#ffffff" rx="12"/>
+      <path fill="#0d6efd" d="M20 20h50v50H20zm10 10v30h30V30zm80-10h50v50h-50zm10 10v30h30V30zM20 130h50v50H20zm10 10v30h30v-30zm50-100h20v20H80zm20 30h20v20h-20zm30 10h20v20h-20zm-50 30h20v20H80zm30 20h20v20h-20zm30-20h20v20h-20zm-20 40h40v20h-40zm30-20h20v20h-20z"/>
+    </svg>`;
+  }
   async function show(trackId, title){
     const url = location.origin + '/track/' + trackId;
-    let svgData = '';
-    try {
-      if (typeof qrcode !== 'function'){ throw new Error('qrcode-generator not loaded'); }
-      const qr = qrcode(0, 'M');
-      qr.addData(url);
-      qr.make();
-      svgData = qr.createSvgTag({ scalable: true, margin: 2 });
-    } catch (e){
-      copyText(url);
-      toast('QR library missing — link copied instead', 'warning');
-      return;
-    }
+    const svgData = generateSvg(url);
     $('#sheetTrackBody').innerHTML = `
       <div class="px-3 pb-4 pt-1 text-center">
         <div class="fw-bold mb-1">${esc(title || 'Share track')}</div>
-        <div class="text-secondary mb-3" style="font-size:.78rem">Scan to open in MusicMan</div>
-        <div class="d-inline-block p-3 bg-white" style="border-radius:12px;max-width:280px">${svgData}</div>
+        <div class="text-secondary mb-3" style="font-size:.78rem">Scan QR or copy link below</div>
+        <div class="d-inline-block p-3 bg-white" style="border-radius:14px;box-shadow:0 4px 16px rgba(0,0,0,.15)">${svgData}</div>
         <div class="mt-3 d-flex gap-2 justify-content-center">
           <button class="pill-btn" onclick="copyText('${esc(url)}')"><i class="bi bi-link-45deg"></i> Copy link</button>
           <button class="pill-btn primary" onclick="closeAllSheets()">Done</button>
@@ -847,6 +952,23 @@ audio.addEventListener('play', () => { audio._crossfadeRunning = false; });
             <span class="sr-value" id="setCrossfadeVal">0s</span>
           </div>
         </div>
+
+        <div class="settings-row">
+          <i class="bi bi-play-btn"></i>
+          <div class="sr-body"><div class="sr-title">Autoplay</div><div class="sr-sub">Fetch related songs when queue ends</div></div>
+          <div class="sr-control"><label class="mm-switch"><input type="checkbox" id="setAutoPlay"><span class="slider"></span></label></div>
+        </div>
+
+        <div class="settings-row">
+          <i class="bi bi-sliders"></i>
+          <div class="sr-body"><div class="sr-title">Equalizer preset</div><div class="sr-sub" id="eqPresetLabel">Flat</div></div>
+          <div class="sr-control seg-ctl" id="setEqPreset">
+            <button data-val="flat">Flat</button>
+            <button data-val="bass_boost">Bass</button>
+            <button data-val="vocal">Vocal</button>
+            <button data-val="rock">Rock</button>
+          </div>
+        </div>
       </div>
 
       <div class="settings-section">
@@ -877,6 +999,10 @@ audio.addEventListener('play', () => { audio._crossfadeRunning = false; });
     const ro = document.getElementById('setOfflineOnly'); if (ro) ro.checked = !!s.offlineOnly;
     const ad = document.getElementById('setAutoDownloadLikes'); if (ad) ad.checked = !!s.autoDownloadLikes;
     const gp = document.getElementById('setGapless'); if (gp) gp.checked = !!s.gapless;
+    const ap = document.getElementById('setAutoPlay'); if (ap) ap.checked = !!s.autoPlay;
+    const eqLabel = document.getElementById('eqPresetLabel');
+    if (eqLabel) eqLabel.textContent = (s.eqPreset || 'flat').replace('_', ' ').toUpperCase();
+    $$('#setEqPreset button').forEach(b => b.classList.toggle('on', b.dataset.val === (s.eqPreset || 'flat')));
     const cf = document.getElementById('setCrossfade');
     if (cf){
       cf.value = Number(s.crossfadeSec) || 0;
@@ -890,6 +1016,14 @@ audio.addEventListener('play', () => { audio._crossfadeRunning = false; });
     ro?.addEventListener('change', e => { setSetting('offlineOnly', e.target.checked); FEAT.Offline.install(); toast(e.target.checked ? 'Offline-only on' : 'Offline-only off'); });
     ad?.addEventListener('change', e => setSetting('autoDownloadLikes', e.target.checked));
     gp?.addEventListener('change', e => setSetting('gapless', e.target.checked));
+    ap?.addEventListener('change', e => setSetting('autoPlay', e.target.checked));
+    document.getElementById('setEqPreset')?.addEventListener('click', e => {
+      const b = e.target.closest('button[data-val]'); if (!b) return;
+      FEAT.Equalizer.setPreset(b.dataset.val);
+      $$('#setEqPreset button').forEach(x => x.classList.toggle('on', x === b));
+      if (eqLabel) eqLabel.textContent = b.dataset.val.replace('_', ' ').toUpperCase();
+      toast('Equalizer: ' + b.dataset.val.replace('_', ' '));
+    });
     cf?.addEventListener('input', e => {
       const v = Number(e.target.value);
       setSetting('crossfadeSec', v);

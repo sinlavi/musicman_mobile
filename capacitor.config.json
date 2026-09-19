@@ -32,9 +32,9 @@
       "overlaysWebView": true
     },
     "Keyboard": {
-      "resize": "body",
+      "resize": "native",
       "style": "DARK",
-      "resizeOnFullScreen": true
+      "resizeOnFullScreen": false
     }
   },
   "android": {

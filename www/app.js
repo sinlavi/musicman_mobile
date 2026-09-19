@@ -48,6 +48,7 @@ const KEY = {
 const SETTINGS_DEFAULT = {
   theme:'dark', animations:true, playbackRate:1, autoScrollLyrics:true,
   autoRetry:true, visualizer:true, accent:'blue', sleepFade:30,
+  autoPlay:true, eqPreset:'flat', eqGains:[0,0,0,0,0],
   // Keys added by features.js:
   offlineOnly:false,
   autoDownloadLikes:false,
@@ -443,11 +444,15 @@ const itemId   = it => it?.trackId || it?.collectionId || it?.artistId || '';
 
 function getArtwork(it, size=300){
   const urls = it?.attachments?.artworkUrls;
-  if (!Array.isArray(urls) || !urls.length) return it?.artworkUrl || '';
-  const best = urls.find(u => String(u.size||'').includes(String(size))) || urls[urls.length-1];
-  const url = best?.url || '';
-  return url.replace(/\/(\d+)x(\d+)(bb)?\./, `/${size}x${size}bb.`);
+  if (Array.isArray(urls) && urls.length){
+    const best = urls.find(u => String(u.size||'').includes(String(size))) || urls[urls.length-1];
+    const url = best?.url || '';
+    if (url) return url.replace(/\/(\d+)x(\d+)(bb)?\./, `/${size}x${size}bb.`);
+  }
+  const art = it?.artworkUrl || it?.artworkUrl100 || it?.artworkUrl60 || '';
+  return art ? art.replace(/\/(\d+)x(\d+)(bb)?\./, `/${size}x${size}bb.`) : '';
 }
+window.getArtwork = getArtwork;
 function hasAudio(it){ const a = it?.attachments?.audioUrls; return Array.isArray(a) && a.some(x => x && x.url); }
 function hasPreview(it){ const p = it?.attachments?.previewUrls; return Array.isArray(p) && p.some(x => x && x.url); }
 function getPreviewUrl(it){
@@ -528,6 +533,7 @@ async function idb(store, mode, fn){
 }
 const cachePut   = (id, blob, meta) => idb('audio','readwrite', s => s.put({ trackId:String(id), blob, meta, size: blob.size, at: Date.now() }));
 const cacheGet   = id => idb('audio','readonly', s => s.get(String(id))).then(r => r || null);
+const cacheKeys  = () => idb('audio','readonly', s => (s.getAllKeys ? s.getAllKeys() : s.getAll())).then(r => r || []);
 const cacheAll   = () => idb('audio','readonly', s => s.getAll()).then(r => r || []);
 const cacheDel   = id => idb('audio','readwrite', s => s.delete(String(id)));
 const cacheClear = () => idb('audio','readwrite', s => s.clear());
@@ -535,7 +541,11 @@ const cacheClear = () => idb('audio','readwrite', s => s.clear());
 const cachedIds = new Set();
 async function refreshCacheIndex(){
   cachedIds.clear();
-  (await cacheAll()).forEach(e => cachedIds.add(String(e.trackId)));
+  const keys = await cacheKeys();
+  keys.forEach(k => {
+    if (k && typeof k === 'object' && k.trackId) cachedIds.add(String(k.trackId));
+    else if (k != null) cachedIds.add(String(k));
+  });
 }
 const isCached = id => cachedIds.has(String(id));
 
@@ -637,6 +647,34 @@ const DL = {
     const url = getPlayable(track);
     if (!url){ this.saving.delete(id); throw new Error('No audio URL'); }
     try {
+      const DownloaderPlugin = window.Capacitor?.Plugins?.Downloader || window.CapacitorDownloader?.Downloader;
+      if (DownloaderPlugin && typeof DownloaderPlugin.download === 'function'){
+        const fileName = safeFileName([track.artistName, track.trackName].filter(Boolean).join(' - ') || id) + extFromType('', url);
+        let progressListener = null;
+        try {
+          if (typeof DownloaderPlugin.addListener === 'function'){
+            progressListener = await DownloaderPlugin.addListener('downloadProgress', (event) => {
+              if (event && event.percent != null){
+                const p = Math.max(0, Math.min(99, Math.round(Number(event.percent) || 0)));
+                this.update(id, { percent: p });
+              }
+            });
+          }
+        } catch (e){ console.warn('[Downloader listener]', e); }
+
+        try {
+          await DownloaderPlugin.download({
+            url: proxyUrl(url),
+            destination: fileName,
+            notification: 'progress'
+          });
+        } finally {
+          if (progressListener && typeof progressListener.remove === 'function'){
+            try { await progressListener.remove(); } catch {}
+          }
+        }
+      }
+
       const res = await fetch(proxyUrl(url));
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const total = Number(res.headers.get('content-length')) || 0;
@@ -1143,12 +1181,14 @@ async function viewHome(){
 let searchFilter = 'all';
 let searchCache = { term: null, items: null };
 function searchBarHtml(term=''){
+  const voiceSupported = typeof FEAT !== 'undefined' && FEAT.Voice?.supported?.();
   return `<div class="search-wrap">
     <form onsubmit="event.preventDefault();submitSearch()">
       <div class="search-box">
         <i class="bi bi-search"></i>
         <input id="searchInput" type="search" placeholder="Songs, albums, artists…" value="${esc(term)}" autocomplete="off" enterkeyhint="search" role="combobox" aria-autocomplete="list" aria-expanded="false" aria-controls="searchSuggest">
         ${term ? `<button type="button" class="icon-btn sm" onclick="clearSearch()" aria-label="Clear"><i class="bi bi-x-circle-fill"></i></button>` : ''}
+        ${voiceSupported ? `<button type="button" class="icon-btn sm text-primary" onclick="FEAT.Voice.start()" aria-label="Voice search"><i class="bi bi-mic-fill"></i></button>` : ''}
       </div>
       <div class="search-suggest" id="searchSuggest" role="listbox" aria-label="Search suggestions"></div>
     </form>
@@ -1830,16 +1870,24 @@ function syncSaveButton(){
   const action = dlActionFor(Player.track);
   btn.innerHTML = `<i class="bi ${action.icon}"></i>`;
 }
+let _fullPlayerEl = null;
+function isFpVisible(){
+  _fullPlayerEl = _fullPlayerEl || $('#full');
+  return _fullPlayerEl?.classList.contains('show');
+}
+
 function setSeekUI(pct){
   const bar = $('#miniBar'); if (bar) bar.style.width = pct + '%';
-  const seek = $('#fpSeek');
-  if (seek && !Player.seeking){ seek.value = Math.round(pct*10); seek.style.setProperty('--p', pct + '%'); }
-  const abA = $('#abMarkerA'), abB = $('#abMarkerB');
-  if (abA && Player.abRepeat.a != null && audio.duration){
-    abA.style.left = (Player.abRepeat.a / audio.duration * 100) + '%';
-  }
-  if (abB && Player.abRepeat.b != null && audio.duration){
-    abB.style.left = (Player.abRepeat.b / audio.duration * 100) + '%';
+  if (isFpVisible()){
+    const seek = $('#fpSeek');
+    if (seek && !Player.seeking){ seek.value = Math.round(pct*10); seek.style.setProperty('--p', pct + '%'); }
+    const abA = $('#abMarkerA'), abB = $('#abMarkerB');
+    if (abA && Player.abRepeat.a != null && audio.duration){
+      abA.style.left = (Player.abRepeat.a / audio.duration * 100) + '%';
+    }
+    if (abB && Player.abRepeat.b != null && audio.duration){
+      abB.style.left = (Player.abRepeat.b / audio.duration * 100) + '%';
+    }
   }
 }
 
@@ -1969,7 +2017,9 @@ audio.addEventListener('timeupdate', () => {
       _lastProgressTick = now;
       const pct = (audio.currentTime / d) * 100;
       setSeekUI(pct);
-      const c = $('#fpCur'); if (c) c.textContent = fmtTime(audio.currentTime);
+      if (isFpVisible()){
+        const c = $('#fpCur'); if (c) c.textContent = fmtTime(audio.currentTime);
+      }
       updateMediaSessionPosition();
     }
     if (now - _lastLyricTick >= LYRIC_TICK_MS){
@@ -2060,10 +2110,22 @@ async function playCachedById(id, fallbackMeta){
   audio.src = url;
   audio.playbackRate = Number(getSettings().playbackRate) || 1;
   audio.play().catch(() => {});
-  const fake = fallbackMeta && fallbackMeta.trackId ? fallbackMeta : {
+  const artworkUrl = m.artwork || getArtwork(fallbackMeta, 100);
+  const fake = fallbackMeta && fallbackMeta.trackId ? {
+    ...fallbackMeta,
+    trackName: fallbackMeta.trackName || m.name || 'Cached track',
+    artistName: fallbackMeta.artistName || m.artist || '',
+    artistId: fallbackMeta.artistId || m.artistId || '',
+    collectionName: fallbackMeta.collectionName || m.album || '',
+    collectionId: fallbackMeta.collectionId || m.collectionId || '',
+    attachments: {
+      artworkUrls: artworkUrl ? [{ url: artworkUrl }] : (fallbackMeta.attachments?.artworkUrls || []),
+      audioUrls: fallbackMeta.attachments?.audioUrls || [{ url:'local', quality:'320' }]
+    }
+  } : {
     wrapperType:'track', trackId:String(id),
     trackName: m.name || 'Cached track', artistName: m.artist || '',
-    artistId: m.artistId || '', collectionName: m.album || '',
+    artistId: m.artistId || '', collectionName: m.album || '', collectionId: m.collectionId || '',
     attachments: { artworkUrls: m.artwork ? [{ url: m.artwork }] : [] }
   };
   Player.track = fake;
@@ -2082,7 +2144,31 @@ function togglePlay(){
   }
   if (audio.paused) audio.play().catch(() => {}); else audio.pause();
 }
-function nextTrack(userInitiated = true){
+async function handleAutoPlay(){
+  if (!getSettings().autoPlay) return false;
+  toast('Autoplay: fetching similar songs…', 'info');
+  try {
+    const popular = await apiPopular(30).catch(() => []);
+    const queueIds = new Set(Player.queue.map(t => String(t.trackId)));
+    const fresh = popular.filter(t => itemType(t) === 'track' && !queueIds.has(String(t.trackId))).slice(0, 5);
+    if (!fresh.length) return false;
+    cacheItems(fresh);
+    fresh.forEach(t => Player.queue.push(t));
+    persistQueue();
+    renderFpTabBody();
+    toast(`Autoplay: added ${fresh.length} tracks`);
+    return true;
+  } catch { return false; }
+}
+
+async function nextTrack(userInitiated = true){
+  if (Player.sleepTimerMode === 'track_end' && !userInitiated){
+    Player.sleepTimerMode = null;
+    audio.pause(); audio.currentTime = 0; syncPlayIcons();
+    const icon = $('#sleepIcon'); if (icon) icon.className = 'bi bi-moon';
+    toast('Sleep timer — ended track');
+    return;
+  }
   const q = Player.queue; if (!q.length) return;
   if (Player.repeat === 'one' && !userInitiated){ audio.currentTime = 0; audio.play().catch(()=>{}); return; }
   let next;
@@ -2091,7 +2177,14 @@ function nextTrack(userInitiated = true){
     next = Player.index + 1;
     if (next >= q.length){
       if (Player.repeat === 'all') next = 0;
-      else { audio.pause(); audio.currentTime = 0; syncPlayIcons(); return; }
+      else {
+        const addedMore = await handleAutoPlay();
+        if (addedMore && next < Player.queue.length){
+          // continue
+        } else {
+          audio.pause(); audio.currentTime = 0; syncPlayIcons(); return;
+        }
+      }
     }
   }
   Player.index = next;
@@ -2392,6 +2485,13 @@ async function ensureFpLyrics(){
   syncedLyricsCache = { trackId: id, lines: [], synced: false, loading: false };
   if (fpTab === 'lyrics') renderFpTabBody();
 }
+let _lyricsFontSize = 0.92; // rem
+function scaleLyricsFont(delta){
+  _lyricsFontSize = Math.min(1.5, Math.max(0.7, _lyricsFontSize + delta));
+  const body = document.querySelector('.fp-lyrics-body');
+  if (body) body.style.fontSize = _lyricsFontSize + 'rem';
+}
+
 function renderFpLyrics(body){
   const t = Player.track;
   if (!t){ body.innerHTML = `<div class="fp-lyrics-empty"><i class="bi bi-music-note-list"></i>Nothing playing</div>`; return; }
@@ -2404,16 +2504,27 @@ function renderFpLyrics(body){
     body.innerHTML = `<div class="fp-lyrics-empty"><i class="bi bi-music-note-list"></i>No lyrics available for this track.</div>`;
     return;
   }
-  body.innerHTML = `<div class="fp-lyrics-body"></div>`;
+  body.innerHTML = `
+    <div class="d-flex justify-content-end gap-2 px-3 pt-2">
+      <button class="pill-btn sm" onclick="scaleLyricsFont(-0.1)" aria-label="Smaller text"><i class="bi bi-zoom-out"></i> A-</button>
+      <button class="pill-btn sm" onclick="scaleLyricsFont(0.1)" aria-label="Larger text"><i class="bi bi-zoom-in"></i> A+</button>
+    </div>
+    <div class="fp-lyrics-body" style="font-size:${_lyricsFontSize}rem"></div>`;
   renderLyricsInto(body.querySelector('.fp-lyrics-body'), syncedLyricsCache.lines, syncedLyricsCache.synced);
 }
 function openSleepTimer(){ sheet('#sheetSleep').show(); }
 function setSleepTimer(minutes){
   sheet('#sheetSleep').hide();
   if (Player.sleepTimer){ clearTimeout(Player.sleepTimer); Player.sleepTimer = null; }
+  Player.sleepTimerMode = null;
   const icon = $('#sleepIcon');
   if (!minutes){ if (icon) icon.className = 'bi bi-moon'; toast('Sleep timer off'); return; }
   if (icon) icon.className = 'bi bi-moon-fill';
+  if (minutes === 'track_end'){
+    Player.sleepTimerMode = 'track_end';
+    toast('Sleep timer · End of track');
+    return;
+  }
   const fadeSec = Number(getSettings().sleepFade) || 0;
   const startFadeAt = Math.max(0, minutes * 60 * 1000 - fadeSec * 1000);
   Player.sleepTimer = setTimeout(() => {
@@ -2531,6 +2642,7 @@ async function openTrackMenu(trackId, playlistId){
   const art = getArtwork(it, 100);
   const action = dlActionFor(it);
   const rows = [];
+  rows.push(`<button class="sheet-item" onclick="menuAction('play')"><i class="bi bi-play-circle text-primary"></i><span>Play track</span></button>`);
   if (dl && ['queued','crawling','saving'].includes(dl.status)){
     rows.push(`<button class="sheet-item" onclick="menuAction('openDl')"><i class="bi ${action.icon} text-info"></i><span>View ${action.isDirect ? 'download' : 'crawl'} progress</span></button>`);
     rows.push(`<button class="sheet-item danger" onclick="menuAction('cancelDl')"><i class="bi bi-x-circle"></i><span>Cancel ${action.isDirect ? 'download' : 'crawl'}</span></button>`);
@@ -2926,9 +3038,11 @@ function dlRowHtml(it){
   const isActive = ['queued','crawling','saving'].includes(it.status);
   const isReady  = it.status === 'ready';
   const isFailed = ['failed','paused'].includes(it.status);
-  const statusLabel = { queued:'Queued', crawling:'Crawling', saving:'Downloading', ready:'Ready', failed:'Failed', paused:'Paused' }[it.status] || it.status;
+  const pct = Math.max(0, Math.min(100, Math.round(Number(it.percent ?? it.progress ?? it.pct ?? 0))));
+  const statusLabel = (it.status === 'saving' || it.status === 'crawling')
+    ? `${it.status === 'saving' ? 'Downloading' : 'Crawling'} · ${pct}%`
+    : ({ queued:'Queued', ready:'Ready', failed:'Failed', paused:'Paused' }[it.status] || it.status);
   const statusClass = { queued:'queued', crawling:'crawling', saving:'saving', ready:'ready', failed:'error', paused:'error' }[it.status] || 'queued';
-  const pct = it.percent || 0;
   const progressClass = isFailed ? 'error' : it.status === 'saving' ? 'saving' : '';
   let rightAction = '';
   if (isActive) rightAction = `<button class="icon-btn sm text-danger" onclick="DL.remove('${esc(it.trackId)}')" aria-label="Cancel"><i class="bi bi-x-lg"></i></button>`;
