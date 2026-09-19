@@ -103,6 +103,8 @@ class _FullPlayerSheetState extends State<FullPlayerSheet>
             ? (track.trackTimeMillis! / 1000).round()
             : 1);
 
+    final onSurfaceColor = Theme.of(context).colorScheme.onSurface;
+
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
       child: Column(
@@ -142,10 +144,7 @@ class _FullPlayerSheetState extends State<FullPlayerSheet>
                 textAlign: TextAlign.center,
                 style: TextStyle(
                   fontSize: 14,
-                  color: Theme.of(context)
-                      .colorScheme
-                      .onSurface
-                      .withValues(alpha: 0.7),
+                  color: onSurfaceColor.withAlpha((0.7 * 255).round()),
                 ),
               ),
             ],
@@ -278,6 +277,7 @@ class _FullPlayerSheetState extends State<FullPlayerSheet>
     return ReorderableListView.builder(
       padding: const EdgeInsets.symmetric(vertical: 12),
       itemCount: queue.length,
+      // ignore: deprecated_member_use
       onReorder: (oldIdx, newIdx) => player.reorderQueue(oldIdx, newIdx),
       itemBuilder: (context, index) {
         final item = queue[index];

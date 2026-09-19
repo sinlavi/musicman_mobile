@@ -35,6 +35,8 @@ class MiniPlayer extends StatelessWidget {
       artwork = trackMap!['artworkUrl100']?.toString() ?? '';
     }
 
+    final onSurfaceColor = Theme.of(context).colorScheme.onSurface;
+
     return GestureDetector(
       onTap: onTap,
       child: Container(
@@ -91,10 +93,7 @@ class MiniPlayer extends StatelessWidget {
                             overflow: TextOverflow.ellipsis,
                             style: TextStyle(
                               fontSize: 11,
-                              color: Theme.of(context)
-                                  .colorScheme
-                                  .onSurface
-                                  .withValues(alpha: 0.6),
+                              color: onSurfaceColor.withAlpha((0.6 * 255).round()),
                             ),
                           ),
                         ],

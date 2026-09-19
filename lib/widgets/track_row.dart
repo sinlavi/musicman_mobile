@@ -43,6 +43,9 @@ class TrackRow extends StatelessWidget {
       artwork = itemMap['artworkUrl100']?.toString() ?? '';
     }
 
+    final primaryColor = Theme.of(context).colorScheme.primary;
+    final onSurfaceColor = Theme.of(context).colorScheme.onSurface;
+
     return InkWell(
       onTap: onTap,
       borderRadius: BorderRadius.circular(12),
@@ -50,7 +53,7 @@ class TrackRow extends StatelessWidget {
         padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
         decoration: BoxDecoration(
           color: isPlaying
-              ? Theme.of(context).colorScheme.primary.withValues(alpha: 0.12)
+              ? primaryColor.withAlpha((0.12 * 255).round())
               : Colors.transparent,
           borderRadius: BorderRadius.circular(12),
         ),
@@ -60,9 +63,7 @@ class TrackRow extends StatelessWidget {
               onPressed: onPlay,
               icon: Icon(
                 isPlaying ? Icons.pause_circle_filled : Icons.play_circle_fill,
-                color: isPlaying
-                    ? Theme.of(context).colorScheme.primary
-                    : const Color(0xFF38BDF8),
+                color: isPlaying ? primaryColor : const Color(0xFF38BDF8),
                 size: 38,
               ),
               padding: EdgeInsets.zero,
@@ -96,9 +97,7 @@ class TrackRow extends StatelessWidget {
                           style: TextStyle(
                             fontWeight: FontWeight.bold,
                             fontSize: 14,
-                            color: isPlaying
-                                ? Theme.of(context).colorScheme.primary
-                                : null,
+                            color: isPlaying ? primaryColor : null,
                           ),
                         ),
                       ),
@@ -108,7 +107,7 @@ class TrackRow extends StatelessWidget {
                           padding: const EdgeInsets.symmetric(
                               horizontal: 6, vertical: 2),
                           decoration: BoxDecoration(
-                            color: Colors.green.withValues(alpha: 0.2),
+                            color: Colors.green.withAlpha((0.2 * 255).round()),
                             borderRadius: BorderRadius.circular(4),
                           ),
                           child: const Row(
@@ -130,7 +129,7 @@ class TrackRow extends StatelessWidget {
                           padding: const EdgeInsets.symmetric(
                               horizontal: 6, vertical: 2),
                           decoration: BoxDecoration(
-                            color: Colors.blue.withValues(alpha: 0.2),
+                            color: Colors.blue.withAlpha((0.2 * 255).round()),
                             borderRadius: BorderRadius.circular(4),
                           ),
                           child: Text(
@@ -151,10 +150,7 @@ class TrackRow extends StatelessWidget {
                     overflow: TextOverflow.ellipsis,
                     style: TextStyle(
                         fontSize: 12,
-                        color: Theme.of(context)
-                            .colorScheme
-                            .onSurface
-                            .withValues(alpha: 0.6)),
+                        color: onSurfaceColor.withAlpha((0.6 * 255).round())),
                   ),
                 ],
               ),
